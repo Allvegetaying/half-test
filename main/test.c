@@ -37,6 +37,8 @@
 
 // 传感器通信串口队列
 static QueueHandle_t uart1_queue;
+// UART1 使能标志：1=使能，0=失能
+static volatile uint8_t uart1_enabled = 0;
 // 上位机通信串口队列
 static QueueHandle_t uart0_queue;
 
@@ -177,11 +179,27 @@ static void worker_up_task(void *pvParameters)
         {
             if (state == PIN_ACTIVE) {
                 printf(">>> 收到激活通知，开始工作！\n");
-                wakeup_gpio_set_level(1);  // 设置唤醒引脚为高电平   
+                wakeup_gpio_set_level(1);  // 设置唤醒引脚为高电平
+                uart1_enabled = 1;  // 使能 UART1 接收
+                //启动433数据的接收
+
+                 
+
+
+
             } else 
             {
                 printf(">>> 收到待机通知，进入待机状态\n");
                 wakeup_gpio_set_level(0);  // 设置唤醒引脚为低电平
+                uart1_enabled = 0;  // 失能 UART1 接收
+                //停止433数据的接收
+                
+
+
+
+
+
+
             }
         }
     }
@@ -204,6 +222,8 @@ static void uart1_event_task(void *pvParameters)
     while (1) {
         // 等待UART事件
         if (xQueueReceive(uart1_queue, &event, portMAX_DELAY)) {
+            // 未使能时丢弃数据，不处理
+            if (!uart1_enabled) continue;
             memset(data, 0, sizeof(data));
 
             switch (event.type) {
