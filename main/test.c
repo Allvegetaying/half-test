@@ -55,6 +55,12 @@ static uint8_t uart1_cmp_len = 0;
 static uint8_t rf_cmp_buf[64];
 static uint8_t rf_cmp_len = 0;
 
+
+
+// 函数声明
+static uint8_t control_gpio_read_level(uint8_t gpio_num);
+
+
 void GPIO_INIT()
 {
     // 配置唤醒引脚为输出模式
@@ -71,7 +77,7 @@ void GPIO_INIT()
     gpio_config_t io_conf2 = {
         .pin_bit_mask = (1ULL << CONTROL_GPIO_NUM1) | (1ULL << CONTROL_GPIO_NUM2),
         .mode = GPIO_MODE_INPUT,
-        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .pull_up_en = GPIO_PULLUP_ENABLE,
         .pull_down_en = GPIO_PULLDOWN_DISABLE,
         .intr_type = GPIO_INTR_DISABLE
     };
@@ -189,6 +195,44 @@ clear:
     xEventGroupClearBits(xEventFlags, UART1_DATA_READY | RF_DATA_READY);
 }
 
+// 重置对比状态，准备下一轮检测
+static void reset_compare_state(void)
+{
+    memset(uart1_cmp_buf, 0, sizeof(uart1_cmp_buf));
+    uart1_cmp_len = 0;
+    memset(rf_cmp_buf, 0, sizeof(rf_cmp_buf));
+    rf_cmp_len = 0;
+    xEventGroupClearBits(xEventFlags, UART1_DATA_READY | RF_DATA_READY);
+    uart0_send_string("RESET: 已重置，等待下一轮检测\r\n");
+}
+
+
+
+// 按键重置任务 - GPIO3/GPIO4 按下时重置
+static void button_reset_task(void *pvParameters)
+{
+    printf("按键重置任务启动 (GPIO%d, GPIO%d)\n", CONTROL_GPIO_NUM1, CONTROL_GPIO_NUM2);
+
+    while (1) 
+    {
+        uint8_t level1 = control_gpio_read_level(CONTROL_GPIO_NUM1);
+        uint8_t level2 = control_gpio_read_level(CONTROL_GPIO_NUM2);
+
+        // 任一按键按下（低电平）触发重置
+        if (level1 == 0 || level2 == 0) 
+        {
+            reset_compare_state();
+            // 等待按键释放，避免重复触发
+            while (control_gpio_read_level(CONTROL_GPIO_NUM1) == 0 || control_gpio_read_level(CONTROL_GPIO_NUM2) == 0) 
+            {
+                vTaskDelay(pdMS_TO_TICKS(50));
+            }
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+}
+
 //唤醒引脚控制
 static void wakeup_gpio_set_level(uint32_t level)
 {
@@ -199,8 +243,8 @@ static void wakeup_gpio_set_level(uint32_t level)
 #define PIN_ACTIVE   1   // 激活状态
 #define PIN_STANDBY  0   // 待机状态
 
-// 检测引脚定义 
-#define DETECT_GPIO_NUM    GPIO_NUM_5
+// 检测引脚定义（避开 A7169 片选 GPIO5，改用 GPIO8）
+#define DETECT_GPIO_NUM    GPIO_NUM_8
 
 // 任务句柄
 static TaskHandle_t xDetectTaskHandle = NULL;
@@ -224,7 +268,18 @@ static void pin_detect_task(void *pvParameters)
 
     printf("引脚检测任务启动 (GPIO%d)\n", DETECT_GPIO_NUM);
 
-    while (1) 
+    // 读取初始电平，同步 lastState 并发送初始通知
+    uint8_t initLevel = gpio_get_level(DETECT_GPIO_NUM);
+    lastState = initLevel;
+    if (initLevel == 1) {
+        printf("初始状态：高电平 -> 通知激活\n");
+        xTaskNotify(xWorkerTaskHandle, PIN_ACTIVE, eSetValueWithOverwrite);
+    } else {
+        printf("初始状态：低电平 -> 通知待机\n");
+        xTaskNotify(xWorkerTaskHandle, PIN_STANDBY, eSetValueWithOverwrite);
+    }
+
+    while (1)
     {
         // 读取引脚电平
         uint8_t currentState = gpio_get_level(DETECT_GPIO_NUM);
@@ -263,15 +318,11 @@ static void worker_up_task(void *pvParameters)
                 wakeup_gpio_set_level(1);  // 设置唤醒引脚为高电平
                 xEventGroupSetBits(xEventFlags, UART1_ENABLE_BIT | RF_ENABLE_BIT);  // 使能 UART1 和 433接收模式
                 
-
             } else 
             {
                 printf(">>> 收到待机通知，进入待机状态\n");
                 wakeup_gpio_set_level(0);  // 设置唤醒引脚为低电平
                 xEventGroupClearBits(xEventFlags, UART1_ENABLE_BIT | RF_ENABLE_BIT);  // 失能 UART1 和 433接收模式
-
-
-
 
             }
         }
@@ -300,7 +351,8 @@ static void uart1_event_task(void *pvParameters)
 
             switch (event.type) {
                 case UART_DATA:  // 收到数据
-                    // 读取数据
+                    // 读取数据（防止越界）
+                    if (event.size >= BUF_SIZE) event.size = BUF_SIZE - 1;
                     uart_read_bytes(UART1_PORT, data, event.size, pdMS_TO_TICKS(100));
                     data[event.size] = '\0';
 
@@ -426,21 +478,20 @@ void app_main(void)
     } else {
         printf("433 RF 初始化失败\n");
     }
-
-    // xTaskCreate(uart0_event_task, "uart0_event_task", 4096, NULL, 12, NULL);
     xTaskCreate(uart1_event_task, "uart1_event_task", 4096, NULL, 12, NULL);   //接收传感器数据
     xTaskCreate(rf_recv_task, "rf_recv", 4096, NULL, 9, NULL);                 //接收433数据
-
     // 先创建工作任务（接收通知方），确保句柄就绪
     xTaskCreate(worker_up_task, "worker_up", 2048, NULL, 8, &xWorkerTaskHandle);
-
     // 再创建引脚检测任务（发送通知方）
     xTaskCreate(pin_detect_task, "pin_detect", 2048, NULL, 10, &xDetectTaskHandle);
-
+    // 创建按键重置任务
+    xTaskCreate(button_reset_task, "btn_reset", 2048, NULL, 7, NULL);
     // 主循环
     while (1)
     {
-        // uart1_send_string("Hello, World!\r\n");
+
+
+
         vTaskDelay(pdMS_TO_TICKS(2000));  // 延时2秒
     }
 }
