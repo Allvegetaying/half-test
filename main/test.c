@@ -363,11 +363,6 @@ static void uart1_event_task(void *pvParameters)
                     }
                     printf("\n");
 
-                    // 回显
-                    uart1_send_string("Echo: ");
-                    uart1_send_string((char*)data);
-                    uart1_send_string("\r\n");
-
                     if(event.size < 5)
                     {
                         // printf("数据不足5字节，跳过解析\n");
@@ -456,13 +451,6 @@ static void rf_recv_task(void *pvParameters)
         vTaskDelay(pdMS_TO_TICKS(10));
     }
 }
-
-//向上位机发送结果（uart1，协议待定需要与厂商进行对接一下）
-// static void uart1_send_string(const char* str)
-// {
-//     uart_write_bytes(UART1_PORT, str, strlen(str));
-// }
-
 void app_main(void)
 {
     GPIO_INIT();

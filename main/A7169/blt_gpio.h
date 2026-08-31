@@ -12,10 +12,10 @@
  * A7169 SPI GPIO 引脚定义 (位操作方式)
  * 根据实际硬件接线修改以下引脚号
  */
-#define A7169_CS_PIN        GPIO_NUM_5      // 片选 SCS
-#define A7169_CLK_PIN       GPIO_NUM_6      // 时钟 SCK
-#define A7169_DIO_PIN       GPIO_NUM_7      // 数据 SDIO (双向)
-#define A7169_GIO1_PIN      GPIO_NUM_15     // GIO1 (状态指示)
+#define A7169_CS_PIN        GPIO_NUM_11     // 片选 SCS
+#define A7169_CLK_PIN       GPIO_NUM_8      // 时钟 SCK
+#define A7169_DIO_PIN       GPIO_NUM_9      // 数据 SDIO (双向)
+#define A7169_GIO1_PIN      GPIO_NUM_10     // GIO1 (状态指示)
 
 /* 片选 SCS */
 #define SCS_MODE_OUT        do { \
