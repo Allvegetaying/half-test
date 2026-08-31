@@ -488,6 +488,6 @@ void app_main(void)
             printf("\n");
         }
       
-        vTaskDelay(pdMS_TO_TICKS(2000));  // 延时2秒
+        vTaskDelay(pdMS_TO_TICKS(100));  // 延时2秒
     }
 }

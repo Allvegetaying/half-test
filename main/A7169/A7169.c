@@ -1578,6 +1578,8 @@ uint8_t A7169_GetData(uint8_t *buf, int len)
     int decoded_len = len + 1;
 
 //    rssi = RSSI_Measurement();
+    // if (GIO1S == 0)
+    //     return 0;
 
     static uint8_t data[64] = {0};
     memset(data, 0, sizeof(data));
@@ -1604,9 +1606,11 @@ uint8_t A7169_GetData(uint8_t *buf, int len)
     	printf("%x ",data[i]);
     printf("\r\n"); 
 
-
     if(memcmp(data, rf_null, 6) == 0)
+    {
+        A7169_StrobeCmd(CMD_RX);
         return 0;
+    }
     uint8_t xor = 0;
 	uint16_t crc16 = 0;
 	crc16 = CRC16(data, 10);
@@ -1665,6 +1669,7 @@ uint8_t A7169_GetData(uint8_t *buf, int len)
         return res;
     }
 
+    A7169_StrobeCmd(CMD_RX);
     return res;
 }
 
