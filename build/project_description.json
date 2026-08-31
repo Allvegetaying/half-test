@@ -1,7 +1,7 @@
 {
     "version":            "1.2",
     "project_name":       "hello_world",
-    "project_version":    "1",
+    "project_version":    "ed70d9b-dirty",
     "project_path":       "C:/Users/VegetaYing/Desktop/project/half+test",
     "idf_path":           "D:/esp32idf/Espressif/frameworks/esp-idf-v5.5.4",
     "build_dir":          "C:/Users/VegetaYing/Desktop/project/half+test/build",
@@ -415,8 +415,8 @@
             "managed_reqs": [],
             "managed_priv_reqs": [],
             "file": "C:/Users/VegetaYing/Desktop/project/half+test/build/esp-idf/main/libmain.a",
-            "sources": [ "C:/Users/VegetaYing/Desktop/project/half+test/main/test.c" ],
-            "include_dirs": []
+            "sources": [ "C:/Users/VegetaYing/Desktop/project/half+test/main/test.c", "C:/Users/VegetaYing/Desktop/project/half+test/main/A7169/A7169.c" ],
+            "include_dirs": [ "A7169" ]
         },
         "mbedtls": {
             "alias": "idf::mbedtls",
@@ -1843,7 +1843,7 @@
             "priv_reqs": [ "spi_flash", "esp_driver_gpio", "esp_driver_uart" ],
             "managed_reqs": [],
             "managed_priv_reqs": [],
-            "include_dirs": []
+            "include_dirs": [ "A7169" ]
         }
     },
     "debug_prefix_map_gdbinit": "",
