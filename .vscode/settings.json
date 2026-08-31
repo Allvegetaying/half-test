@@ -1,0 +1,20 @@
+{
+  "idf.currentSetup": "D:/esp32idf/Espressif/frameworks/esp-idf-v5.5.4/",
+  "idf.customExtraVars": {
+    "IDF_TOOLS_PATH": "D:\\esp32\\.espressif",
+    "IDF_CCACHE_ENABLE": "0"
+  },
+  "clangd.path": "D:\\esp32idf\\Espressif\\tools\\esp-clang\\esp-19.1.2_20250312\\esp-clang\\bin\\clangd.exe",
+  "clangd.arguments": [
+    "--background-index",
+    "--query-driver=**",
+    "--compile-commands-dir=c:/Users/VegetaYing/Desktop/project/test/build",
+    "--log=verbose",
+    "--pretty"
+  ],
+  "idf.openOcdConfigs": [
+    "board/esp32s3-builtin.cfg"
+  ],
+  "idf.flashType": "UART",
+  "idf.portWin": "COM30"
+}

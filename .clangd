@@ -1,0 +1,7 @@
+CompileFlags:
+    CompilationDatabase: build/
+    Remove: [-f*, -m*, -W*, -gdwarf*, -ggdb, -Og]
+    Add: [-IC:/Users/VegetaYing/Desktop/project/test/build/config]
+
+Index:
+    Background: Build

@@ -1,0 +1,36 @@
+{
+  "configurations": [
+    {
+      "name": "ESP-IDF",
+      "includePath": [
+        "${workspaceFolder}/**",
+        "${workspaceFolder}/build/config",
+        "D:/esp32idf/Espressif/frameworks/esp-idf-v5.5.4/components/**",
+        "D:/esp32idf/Espressif/frameworks/esp-idf-v5.5.4/components/freertos/FreeRTOS-Kernel/include",
+        "D:/esp32idf/Espressif/frameworks/esp-idf-v5.5.4/components/freertos/FreeRTOS-Kernel/portable/xtensa/include",
+        "D:/esp32idf/Espressif/frameworks/esp-idf-v5.5.4/components/freertos/esp_additions/include",
+        "D:/esp32idf/Espressif/frameworks/esp-idf-v5.5.4/components/esp_common/include",
+        "D:/esp32idf/Espressif/frameworks/esp-idf-v5.5.4/components/esp_system/include",
+        "D:/esp32idf/Espressif/frameworks/esp-idf-v5.5.4/components/esp_hw_support/include",
+        "D:/esp32idf/Espressif/frameworks/esp-idf-v5.5.4/components/esp_rom/include",
+        "D:/esp32idf/Espressif/frameworks/esp-idf-v5.5.4/components/esp_flash/include",
+        "D:/esp32idf/Espressif/frameworks/esp-idf-v5.5.4/components/log/include",
+        "D:/esp32idf/Espressif/frameworks/esp-idf-v5.5.4/components/soc/include",
+        "D:/esp32idf/Espressif/frameworks/esp-idf-v5.5.4/components/hal/include",
+        "D:/esp32idf/Espressif/frameworks/esp-idf-v5.5.4/components/heap/include",
+        "D:/esp32idf/Espressif/frameworks/esp-idf-v5.5.4/components/newlib/platform_include"
+      ],
+      "defines": [
+        "ESP_PLATFORM",
+        "IDF_VER=\"v5.5.4\"",
+        "CONFIG_MMU_PAGE_SIZE=0x4000",
+        "CONFIG_XTAL_FREQ=40"
+      ],
+      "compilerPath": "D:/esp32idf/Espressif/tools/xtensa-esp-elf/esp-14.2.0_20260121/xtensa-esp-elf/bin/xtensa-esp32s3-elf-gcc.exe",
+      "cStandard": "gnu17",
+      "cppStandard": "gnu++2b",
+      "intelliSenseMode": "gcc-xtensa"
+    }
+  ],
+  "version": 4
+}
