@@ -57,16 +57,25 @@ static uint8_t rf_cmp_len = 0;
 
 void GPIO_INIT()
 {
-    // 配置GPIO2为输出模式
+    // 配置唤醒引脚为输出模式
     gpio_config_t io_conf = {
-        .pin_bit_mask = (1ULL << WAKEUP_GPIO_NUM) || (1ULL << CONTROL_GPIO_NUM1) || (1ULL << CONTROL_GPIO_NUM2),  // 选择GPIO2
-        .mode = GPIO_MODE_OUTPUT,                 // 输出模式
-        .pull_up_en = GPIO_PULLUP_DISABLE,        // 禁用上拉
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,    // 禁用下拉
-        .intr_type = GPIO_INTR_DISABLE            // 禁用中断
+        .pin_bit_mask = (1ULL << WAKEUP_GPIO_NUM),
+        .mode = GPIO_MODE_OUTPUT,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE
     };
     gpio_config(&io_conf);
 
+    // 配置两路开关引脚为输入模式
+    gpio_config_t io_conf2 = {
+        .pin_bit_mask = (1ULL << CONTROL_GPIO_NUM1) | (1ULL << CONTROL_GPIO_NUM2),
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE
+    };
+    gpio_config(&io_conf2);
 }
 
 // 传感器通信串口
@@ -215,7 +224,8 @@ static void pin_detect_task(void *pvParameters)
 
     printf("引脚检测任务启动 (GPIO%d)\n", DETECT_GPIO_NUM);
 
-    while (1) {
+    while (1) 
+    {
         // 读取引脚电平
         uint8_t currentState = gpio_get_level(DETECT_GPIO_NUM);
 
@@ -269,11 +279,10 @@ static void worker_up_task(void *pvParameters)
 }
 
 
-//两路开关控制引脚
-static void control_gpio_set_level(uint32_t level)
+//两路开关引脚读取
+static uint8_t control_gpio_read_level(uint8_t gpio_num)
 {
-    gpio_set_level(CONTROL_GPIO_NUM1, level);
-    gpio_set_level(CONTROL_GPIO_NUM2, level);
+    return gpio_get_level(gpio_num);
 }
 
 //传感器数据接收函数
