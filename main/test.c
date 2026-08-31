@@ -46,6 +46,14 @@ static QueueHandle_t uart0_queue;
 static EventGroupHandle_t xEventFlags;
 #define UART1_ENABLE_BIT   (1 << 0)   // UART1 使能位
 #define RF_ENABLE_BIT      (1 << 1)   // 433 RF 使能位
+#define UART1_DATA_READY   (1 << 2)   // UART1 数据就绪
+#define RF_DATA_READY      (1 << 3)   // 433 数据就绪
+
+// 数据对比缓冲区
+static uint8_t uart1_cmp_buf[64];
+static uint8_t uart1_cmp_len = 0;
+static uint8_t rf_cmp_buf[64];
+static uint8_t rf_cmp_len = 0;
 
 void GPIO_INIT()
 {
@@ -112,6 +120,64 @@ static int uart1_receive_data(uint8_t* data, size_t max_len)
 {
     int len = uart_read_bytes(UART1_PORT, data, max_len, pdMS_TO_TICKS(100));
     return len;
+}
+
+// UART0发送字符串
+static void uart0_send_string(const char* str)
+{
+    uart_write_bytes(UART0_PORT, str, strlen(str));
+}
+
+// 数据对比与结果上报
+static void compare_and_report(void)
+{
+    // 两边数据都就绪才对比
+    EventBits_t bits = xEventGroupGetBits(xEventFlags);
+    if (!(bits & UART1_DATA_READY) || !(bits & RF_DATA_READY))
+        return;
+
+    // 取最小长度对比
+    uint8_t cmp_len = (uart1_cmp_len < rf_cmp_len) ? uart1_cmp_len : rf_cmp_len;
+
+    if (cmp_len == 0) {
+        uart0_send_string("FAIL: 数据长度为0\r\n");
+        goto clear;
+    }
+
+    // 逐字节对比
+    int match = 1;
+    for (uint8_t i = 0; i < cmp_len; i++) {
+        if (uart1_cmp_buf[i] != rf_cmp_buf[i]) {
+            match = 0;
+            break;
+        }
+    }
+
+    if (match && uart1_cmp_len == rf_cmp_len) {
+        uart0_send_string("PASS: 数据一致\r\n");
+    } else {
+        uart0_send_string("FAIL: 数据不一致\r\n");
+        // 打印对比详情
+        char msg[128];
+        snprintf(msg, sizeof(msg), "UART1[%d]: ", uart1_cmp_len);
+        uart0_send_string(msg);
+        for (uint8_t i = 0; i < uart1_cmp_len; i++) {
+            snprintf(msg, sizeof(msg), "0x%02X ", uart1_cmp_buf[i]);
+            uart0_send_string(msg);
+        }
+        uart0_send_string("\r\n");
+        snprintf(msg, sizeof(msg), "RF[%d]:    ", rf_cmp_len);
+        uart0_send_string(msg);
+        for (uint8_t i = 0; i < rf_cmp_len; i++) {
+            snprintf(msg, sizeof(msg), "0x%02X ", rf_cmp_buf[i]);
+            uart0_send_string(msg);
+        }
+        uart0_send_string("\r\n");
+    }
+
+clear:
+    // 清除就绪标志，等待下一轮数据
+    xEventGroupClearBits(xEventFlags, UART1_DATA_READY | RF_DATA_READY);
 }
 
 //唤醒引脚控制
@@ -185,13 +251,15 @@ static void worker_up_task(void *pvParameters)
             if (state == PIN_ACTIVE) {
                 printf(">>> 收到激活通知，开始工作！\n");
                 wakeup_gpio_set_level(1);  // 设置唤醒引脚为高电平
-                xEventGroupSetBits(xEventFlags, UART1_ENABLE_BIT | RF_ENABLE_BIT);  // 使能 UART1 和 433
+                xEventGroupSetBits(xEventFlags, UART1_ENABLE_BIT | RF_ENABLE_BIT);  // 使能 UART1 和 433接收模式
+                
 
             } else 
             {
                 printf(">>> 收到待机通知，进入待机状态\n");
                 wakeup_gpio_set_level(0);  // 设置唤醒引脚为低电平
-                xEventGroupClearBits(xEventFlags, UART1_ENABLE_BIT | RF_ENABLE_BIT);  // 失能 UART1 和 433
+                xEventGroupClearBits(xEventFlags, UART1_ENABLE_BIT | RF_ENABLE_BIT);  // 失能 UART1 和 433接收模式
+
 
 
 
@@ -253,7 +321,13 @@ static void uart1_event_task(void *pvParameters)
                     uint8_t battery_voltage = data[4]; // 电池电压
 
                     printf("解析: ID=%d, 压力=%d, 温度=%d, 加速度=%d, 电池电压=%d\n",
-                           ID, stress, temperature, acceleration, battery_voltage);    
+                           ID, stress, temperature, acceleration, battery_voltage);
+
+                    // 存入对比缓冲区，标记就绪
+                    uart1_cmp_len = (event.size < 64) ? event.size : 64;
+                    memcpy(uart1_cmp_buf, data, uart1_cmp_len);
+                    xEventGroupSetBits(xEventFlags, UART1_DATA_READY);
+                    compare_and_report();
                     break;
                 case UART_FIFO_OVF:  // FIFO溢出
                     printf("UART1 FIFO 溢出\n");
@@ -301,14 +375,20 @@ static void rf_recv_task(void *pvParameters)
         if (GIO1S) 
         {
             uint8_t len = A7169_GetData(rf_buf, 11);
-            if (len > 0) 
+            if (len > 0)
             {
                 printf("433 收到 %d 字节: ", len);
-                for (int i = 0; i < len; i++) 
+                for (int i = 0; i < len; i++)
                 {
                     printf("0x%02X ", rf_buf[i]);
                 }
                 printf("\n");
+
+                // 存入对比缓冲区，标记就绪
+                rf_cmp_len = (len < 64) ? len : 64;
+                memcpy(rf_cmp_buf, rf_buf, rf_cmp_len);
+                xEventGroupSetBits(xEventFlags, RF_DATA_READY);
+                compare_and_report();
             }
         }
 
@@ -328,7 +408,7 @@ void app_main(void)
     UART0_INIT();
     UART1_INIT();
 
-    // 创建事件标志组
+    // 创建事件标志组 存放各种状态标志位
     xEventFlags = xEventGroupCreate();
 
     // 初始化 433 RF 模块
