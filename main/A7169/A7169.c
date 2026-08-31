@@ -1140,7 +1140,7 @@ uint8_t InitRF(void)
     if(A7169_Cal())         //IF and VCO Calibration
         return 1;
     A7169_StrobeCmd(CMD_RX);
-    RSSI_Measurement();
+    // RSSI_Measurement();
     RF_Init_Flg = true;
 
     return 0;
@@ -1575,6 +1575,7 @@ uint8_t xor_check8(uint8_t *buf, uint8_t len)
 uint8_t A7169_GetData(uint8_t *buf, int len)
 {
     uint8_t res = 0;
+    int decoded_len = len + 1;
 
 //    rssi = RSSI_Measurement();
 
@@ -1586,7 +1587,7 @@ uint8_t A7169_GetData(uint8_t *buf, int len)
     A7169_CS_L();
     A7169_WriteByte(CMD_FIFO_R);   //RX FIFO read command
     A7169_InMode();
-    for(int i = 0; i < (len + 1) * 2; i++)
+    for(int i = 0; i < decoded_len * 2; i++)
         tmpbuf[i] = A7169_ReadByte();
 
     A7169_CS_H();
@@ -1596,8 +1597,12 @@ uint8_t A7169_GetData(uint8_t *buf, int len)
 //    	printf("%x ",tmpbuf[i]);
 //    printf("\r\n");
 
-    manchersetrAnlysis(data, tmpbuf, len);
+    manchersetrAnlysis(data, tmpbuf, decoded_len);
     uint8_t rf_null[6] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+    printf("test: ");
+    for(int i= 0;i<12;i++)
+    	printf("%x ",data[i]);
+    printf("\r\n"); 
 
 
     if(memcmp(data, rf_null, 6) == 0)
@@ -1605,8 +1610,10 @@ uint8_t A7169_GetData(uint8_t *buf, int len)
     uint8_t xor = 0;
 	uint16_t crc16 = 0;
 	crc16 = CRC16(data, 10);
+    
 
-	if(data[10] == (crc16>>8) && (data[11] == (uint8_t)crc16) && crc16!=0  && (data[9]&0x20) == 0x20)//&& data[11] == crc16
+	// if(data[10] == (crc16>>8) && (data[11] == (uint8_t)crc16) && crc16!=0  && (data[9]&0x20) == 0x20)//&& data[11] == crc16
+    if(data[10] == (crc16>>8) && (data[11] == (uint8_t)crc16) && crc16!=0 )//&& data[11] == crc16
 	{
 		memcpy(buf, data, 12);
         res = 12;
