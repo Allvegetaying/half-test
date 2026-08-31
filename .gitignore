@@ -1,0 +1,59 @@
+# ESP-IDF build artifacts
+build/
+managed_components/
+dependencies.lock
+
+# sdkconfig backups
+sdkconfig.old
+sdkconfig.ci
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+*.egg
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.clangd/
+compile_commands.json
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Debug files
+*.dSYM/
+*.su
+*.idb
+*.pdb
+
+# Compiled Object files
+*.slo
+*.lo
+*.o
+*.obj
+
+# Precompiled Headers
+*.gch
+*.pch
+
+# Linker output
+*.ilk
+*.map
+*.exp
+
+# Binary files
+*.bin
+*.elf
+*.hex
+
+# Temporary files
+*.tmp
+*.log
