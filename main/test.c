@@ -468,11 +468,8 @@ void app_main(void)
     }
     // xTaskCreate(uart1_event_task, "uart1_event_task", 4096, NULL, 12, NULL);   //接收传感器数据
     // xTaskCreate(rf_recv_task, "rf_recv", 4096, NULL, 9, NULL);                 //接收433数据
-    // // 先创建工作任务（接收通知方），确保句柄就绪
     // xTaskCreate(worker_up_task, "worker_up", 2048, NULL, 8, &xWorkerTaskHandle);
-    // // 再创建引脚检测任务（发送通知方）
     // xTaskCreate(pin_detect_task, "pin_detect", 2048, NULL, 10, &xDetectTaskHandle);
-    // // 创建按键重置任务
     // xTaskCreate(button_reset_task, "btn_reset", 2048, NULL, 7, NULL);
     // 主循环
     while (1)

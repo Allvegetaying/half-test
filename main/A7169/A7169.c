@@ -1139,6 +1139,7 @@ uint8_t InitRF(void)
 
     if(A7169_Cal())         //IF and VCO Calibration
         return 1;
+    A7169_WritePageA(GIO_PAGEA, (A7169Config_PageA[GIO_PAGEA] & 0xF000) | 0x0045);  //GIO1=FSYNC, GIO2=WTR
     A7169_StrobeCmd(CMD_RX);
     // RSSI_Measurement();
     RF_Init_Flg = true;
