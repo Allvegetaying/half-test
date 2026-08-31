@@ -58,7 +58,8 @@ void GPIO_INIT()
 void UART1_INIT(void)
 {
     // 配置UART1参数
-    const uart_config_t uart_config = {
+    const uart_config_t uart_config = 
+    {
         .baud_rate = UART1_BAUD_RATE,
         .data_bits = UART_DATA_8_BITS,
         .parity = UART_PARITY_DISABLE,
@@ -77,7 +78,8 @@ void UART1_INIT(void)
 void UART0_INIT(void)
 {
     // 配置UART0参数
-    const uart_config_t uart_config = {
+    const uart_config_t uart_config = 
+    {
         .baud_rate = UART0_BAUD_RATE,
         .data_bits = UART_DATA_8_BITS,
         .parity = UART_PARITY_DISABLE,
@@ -110,6 +112,81 @@ static void wakeup_gpio_set_level(uint32_t level)
 {
     gpio_set_level(WAKEUP_GPIO_NUM, level);
 }
+
+// 定义状态
+#define PIN_ACTIVE   1   // 激活状态
+#define PIN_STANDBY  0   // 待机状态
+
+// 检测引脚定义 
+#define DETECT_GPIO_NUM    GPIO_NUM_5
+
+// 任务句柄
+static TaskHandle_t xDetectTaskHandle = NULL;
+static TaskHandle_t xWorkerTaskHandle = NULL;
+
+// 引脚检测任务 - 读取电平并通知其他任务
+static void pin_detect_task(void *pvParameters)
+{
+    uint8_t lastState = PIN_STANDBY;
+
+    // 配置 GPIO5 为输入模式
+    gpio_config_t io_conf = 
+    {
+        .pin_bit_mask = (1ULL << DETECT_GPIO_NUM),
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_ENABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE
+    };
+    gpio_config(&io_conf);
+
+    printf("引脚检测任务启动 (GPIO%d)\n", DETECT_GPIO_NUM);
+
+    while (1) {
+        // 读取引脚电平
+        uint8_t currentState = gpio_get_level(DETECT_GPIO_NUM);
+
+        // 状态变化时才通知
+        if (currentState != lastState) 
+        {
+            if (currentState == 1) 
+            {
+                printf("检测到高电平 -> 通知激活\n");
+                // 发送激活通知
+                xTaskNotify(xWorkerTaskHandle, PIN_ACTIVE, eSetValueWithOverwrite);
+            } else 
+            {
+                printf("检测到低电平 -> 通知待机\n");
+                // 发送待机通知
+                xTaskNotify(xWorkerTaskHandle, PIN_STANDBY, eSetValueWithOverwrite);
+            }
+            lastState = currentState;
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(50));  // 50ms 检测一次
+    }
+}
+
+static void worker_up_task(void *pvParameters)
+{
+    uint32_t state = PIN_STANDBY;
+    printf("工作任务启动，等待通知...\n");
+    while (1) {
+        // 等待任务通知
+        if (xTaskNotifyWait(0, 0, &state, portMAX_DELAY) == pdTRUE) 
+        {
+            if (state == PIN_ACTIVE) {
+                printf(">>> 收到激活通知，开始工作！\n");
+                wakeup_gpio_set_level(1);  // 设置唤醒引脚为高电平   
+            } else 
+            {
+                printf(">>> 收到待机通知，进入待机状态\n");
+                wakeup_gpio_set_level(0);  // 设置唤醒引脚为低电平
+            }
+        }
+    }
+}
+
 
 //两路开关控制引脚
 static void control_gpio_set_level(uint32_t level)
@@ -276,7 +353,13 @@ void app_main(void)
     UART1_INIT();
 
     // xTaskCreate(uart0_event_task, "uart0_event_task", 4096, NULL, 12, NULL);
-    xTaskCreate(uart1_event_task, "uart1_event_task", 4096, NULL, 12, NULL);
+    xTaskCreate(uart1_event_task, "uart1_event_task", 4096, NULL, 12, NULL);   //接收传感器数据
+
+    // 先创建工作任务（接收通知方），确保句柄就绪
+    xTaskCreate(worker_up_task, "worker_up", 2048, NULL, 8, &xWorkerTaskHandle);
+
+    // 再创建引脚检测任务（发送通知方）
+    xTaskCreate(pin_detect_task, "pin_detect", 2048, NULL, 10, &xDetectTaskHandle);
 
     // 主循环
     while (1)

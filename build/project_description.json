@@ -1,7 +1,7 @@
 {
     "version":            "1.2",
     "project_name":       "hello_world",
-    "project_version":    "ed70d9b-dirty",
+    "project_version":    "7e0a693-dirty",
     "project_path":       "C:/Users/VegetaYing/Desktop/project/half+test",
     "idf_path":           "D:/esp32idf/Espressif/frameworks/esp-idf-v5.5.4",
     "build_dir":          "C:/Users/VegetaYing/Desktop/project/half+test/build",
