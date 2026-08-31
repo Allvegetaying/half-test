@@ -9,12 +9,14 @@
 #include "sdkconfig.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/event_groups.h"
 #include "esp_chip_info.h"
 #include "esp_flash.h"
 #include "esp_system.h"
 #include "driver/gpio.h"
 #include "driver/uart.h"
 #include "string.h"
+#include "A7169/A7169.h"
 
 // GPIO2 引脚定义
 #define WAKEUP_GPIO_NUM      GPIO_NUM_2
@@ -37,10 +39,13 @@
 
 // 传感器通信串口队列
 static QueueHandle_t uart1_queue;
-// UART1 使能标志：1=使能，0=失能
-static volatile uint8_t uart1_enabled = 0;
 // 上位机通信串口队列
 static QueueHandle_t uart0_queue;
+
+// 事件标志组：统一管理各模块使能状态
+static EventGroupHandle_t xEventFlags;
+#define UART1_ENABLE_BIT   (1 << 0)   // UART1 使能位
+#define RF_ENABLE_BIT      (1 << 1)   // 433 RF 使能位
 
 void GPIO_INIT()
 {
@@ -180,23 +185,13 @@ static void worker_up_task(void *pvParameters)
             if (state == PIN_ACTIVE) {
                 printf(">>> 收到激活通知，开始工作！\n");
                 wakeup_gpio_set_level(1);  // 设置唤醒引脚为高电平
-                uart1_enabled = 1;  // 使能 UART1 接收
-                //启动433数据的接收
-
-                 
-
-
+                xEventGroupSetBits(xEventFlags, UART1_ENABLE_BIT | RF_ENABLE_BIT);  // 使能 UART1 和 433
 
             } else 
             {
                 printf(">>> 收到待机通知，进入待机状态\n");
                 wakeup_gpio_set_level(0);  // 设置唤醒引脚为低电平
-                uart1_enabled = 0;  // 失能 UART1 接收
-                //停止433数据的接收
-                
-
-
-
+                xEventGroupClearBits(xEventFlags, UART1_ENABLE_BIT | RF_ENABLE_BIT);  // 失能 UART1 和 433
 
 
 
@@ -223,7 +218,7 @@ static void uart1_event_task(void *pvParameters)
         // 等待UART事件
         if (xQueueReceive(uart1_queue, &event, portMAX_DELAY)) {
             // 未使能时丢弃数据，不处理
-            if (!uart1_enabled) continue;
+            if (!(xEventGroupGetBits(xEventFlags) & UART1_ENABLE_BIT)) continue;
             memset(data, 0, sizeof(data));
 
             switch (event.type) {
@@ -289,77 +284,38 @@ static void uart1_event_task(void *pvParameters)
     vTaskDelete(NULL);
 }
 
-// //上位机接收函数（应答的时候使用）
-// static void uart0_event_task(void *pvParameters)
-// {
-//     uart_event_t event;
-//     uint8_t data[BUF_SIZE];
+// 433 RF 数据接收任务
+static void rf_recv_task(void *pvParameters)
+{
+    uint8_t rf_buf[64];
 
-//     while (1) {
-//         // 等待UART事件
-//         if (xQueueReceive(uart0_queue, &event, portMAX_DELAY)) {
-//             memset(data, 0, sizeof(data));
+    printf("433 RF 接收任务启动\n");
 
-//             switch (event.type) {
-//                 case UART_DATA:  // 收到数据
-//                     // 读取数据
-//                     uart_read_bytes(UART1_PORT, data, event.size, pdMS_TO_TICKS(100));
-//                     data[event.size] = '\0';
+    while (1) {
+        if (!(xEventGroupGetBits(xEventFlags) & RF_ENABLE_BIT)) {
+            vTaskDelay(pdMS_TO_TICKS(50));
+            continue;
+        }
 
-//                     // 在VSCode串口监视器显示
-//                     printf("UART1 收到 %d 字节: %s\n", event.size, data);
+        // 检查 GIO1S 引脚，高电平表示收到数据
+        if (GIO1S) 
+        {
+            uint8_t len = A7169_GetData(rf_buf, 11);
+            if (len > 0) 
+            {
+                printf("433 收到 %d 字节: ", len);
+                for (int i = 0; i < len; i++) 
+                {
+                    printf("0x%02X ", rf_buf[i]);
+                }
+                printf("\n");
+            }
+        }
 
-//                     uart1_send_string("Echo: ");
-//                     uart1_send_string((char*)data);
-//                     uart1_send_string("\r\n");
-//                     // uint8_t command =0; 
-//                     if(event.size == 0)
-//                     {
-//                         printf("UART1 收到空数据\n");
-//                         memset(data, 0, sizeof(data));
-//                         break;
-//                     }
-//                     uint8_t ID = 0;
-//                     uint8_t stress = 0;   
-//                     uint8_t  temperature = 0;
-//                     uint8_t  acceleration = 0;
-//                     uint8_t  battery_voltage =0;
-//                     ID = data[0];      //ID
-//                     stress = data[1]; //压力
-//                     temperature = data[2]; // 温度
-//                     acceleration = data[3]; // 加速度
-//                     battery_voltage = data[4]; // 电池电压
-//                     printf("UART1 解析数据: ID=%d, 压力=%d, 温度=%d, 加速度=%d, 电池电压=%d\n",
-//                            data[0], data[1], data[2], data[3], data[4]);    
-//                     break;
-//                 case UART_FIFO_OVF:  // FIFO溢出
-//                     printf("UART1 FIFO 溢出\n");
-//                     uart_flush_input(UART1_PORT);
-//                     xQueueReset(uart1_queue);
-//                     break;
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+}
 
-//                 case UART_BUFFER_FULL:  // 缓冲区满
-//                     printf("UART1 缓冲区满\n");
-//                     uart_flush_input(UART1_PORT);
-//                     xQueueReset(uart1_queue);
-//                     break;
-
-//                 case UART_PARITY_ERR:  // 校验错误
-//                     printf("UART1 校验错误\n");
-//                     break;
-
-//                 case UART_FRAME_ERR:  // 帧错误
-//                     printf("UART1 帧错误\n");
-//                     break;
-
-//                 default:
-//                     printf("UART1 事件类型: %d\n", event.type);
-//                     break;
-//             }
-//         }
-//     }
-//     vTaskDelete(NULL);
-// }
 //向上位机发送结果（uart1，协议待定需要与厂商进行对接一下）
 // static void uart1_send_string(const char* str)
 // {
@@ -372,8 +328,19 @@ void app_main(void)
     UART0_INIT();
     UART1_INIT();
 
+    // 创建事件标志组
+    xEventFlags = xEventGroupCreate();
+
+    // 初始化 433 RF 模块
+    if (InitRF() == 0) {
+        printf("433 RF 初始化成功\n");
+    } else {
+        printf("433 RF 初始化失败\n");
+    }
+
     // xTaskCreate(uart0_event_task, "uart0_event_task", 4096, NULL, 12, NULL);
     xTaskCreate(uart1_event_task, "uart1_event_task", 4096, NULL, 12, NULL);   //接收传感器数据
+    xTaskCreate(rf_recv_task, "rf_recv", 4096, NULL, 9, NULL);                 //接收433数据
 
     // 先创建工作任务（接收通知方），确保句柄就绪
     xTaskCreate(worker_up_task, "worker_up", 2048, NULL, 8, &xWorkerTaskHandle);
