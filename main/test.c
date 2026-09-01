@@ -20,8 +20,8 @@
 
 // GPIO2 引脚定义
 #define WAKEUP_GPIO_NUM      GPIO_NUM_2
-#define CONTROL_GPIO_NUM1    GPIO_NUM_3
-#define CONTROL_GPIO_NUM2    GPIO_NUM_4
+#define CONTROL_GPIO_NUM1    GPIO_NUM_5
+#define CONTROL_GPIO_NUM2    GPIO_NUM_6
 
 // UART0 引脚定义
 #define UART0_TX_PIN    43
@@ -77,7 +77,7 @@ void GPIO_INIT()
         .pin_bit_mask = (1ULL << CONTROL_GPIO_NUM1) | (1ULL << CONTROL_GPIO_NUM2),
         .mode = GPIO_MODE_INPUT,
         .pull_up_en = GPIO_PULLUP_ENABLE,
-        .pull_down_en = GPIO_PULLDOWN_ENABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
         .intr_type = GPIO_INTR_DISABLE
     };
     gpio_config(&io_conf2);
@@ -248,8 +248,7 @@ static void wakeup_gpio_set_level(uint32_t level)
 #define PIN_ACTIVE   1   // 激活状态
 #define PIN_STANDBY  0   // 待机状态
 
-// 检测引脚定义（注意：不能使用 A7169 占用的引脚：GPIO8/9/10/11）
-#define DETECT_GPIO_NUM    GPIO_NUM_5  // ⚠️ 与 A7169_CLK 冲突！需要改为其他引脚
+#define DETECT_GPIO_NUM    GPIO_NUM_4
 
 // A7169 GIO1 中断引脚定义 (GPIO10)
 #define A7169_GIO1_IRQ_PIN  GPIO_NUM_10
@@ -269,8 +268,8 @@ static void pin_detect_task(void *pvParameters)
     {
         .pin_bit_mask = (1ULL << DETECT_GPIO_NUM),
         .mode = GPIO_MODE_INPUT,
-        .pull_up_en = GPIO_PULLUP_ENABLE,
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_ENABLE,
         .intr_type = GPIO_INTR_DISABLE
     };
     gpio_config(&io_conf);
@@ -304,7 +303,6 @@ static void pin_detect_task(void *pvParameters)
             } else 
             {
                 printf("检测到低电平 -> 通知待机\n");
-                // 发送待机通知
                 xTaskNotify(xWorkerTaskHandle, PIN_STANDBY, eSetValueWithOverwrite);
             }
             lastState = currentState;
@@ -507,7 +505,7 @@ void app_main(void)
     xTaskCreate(pin_detect_task, "pin_detect", 2048, NULL, 7, &xDetectTaskHandle);
     xTaskCreate(button_reset_task, "button_reset", 2048, NULL, 5, NULL);
     // 设置唤醒引脚为高电平，通知进入工作状态
-    xEventGroupSetBits(xEventFlags, RF_ENABLE_BIT);
+    // xEventGroupSetBits(xEventFlags, RF_ENABLE_BIT);
 
 
     while (1)
