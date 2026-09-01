@@ -42,7 +42,7 @@ static QueueHandle_t uart1_queue;
 // 上位机通信串口队列
 static QueueHandle_t uart0_queue;
 
-// 事件标志组：统一管理各模块使能状态
+// 事件标志组
 static EventGroupHandle_t xEventFlags;
 #define UART1_ENABLE_BIT   (1 << 0)   // UART1 使能位
 #define RF_ENABLE_BIT      (1 << 1)   // 433 RF 使能位
@@ -55,11 +55,10 @@ static uint8_t uart1_cmp_len = 0;
 static uint8_t rf_cmp_buf[64];
 static uint8_t rf_cmp_len = 0;
 
-
-
 // 函数声明
 static uint8_t control_gpio_read_level(uint8_t gpio_num);
 
+uint8_t state=0;
 
 void GPIO_INIT()
 {
@@ -78,7 +77,7 @@ void GPIO_INIT()
         .pin_bit_mask = (1ULL << CONTROL_GPIO_NUM1) | (1ULL << CONTROL_GPIO_NUM2),
         .mode = GPIO_MODE_INPUT,
         .pull_up_en = GPIO_PULLUP_ENABLE,
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_ENABLE,
         .intr_type = GPIO_INTR_DISABLE
     };
     gpio_config(&io_conf2);
@@ -161,29 +160,35 @@ static void compare_and_report(void)
 
     // 逐字节对比
     int match = 1;
-    for (uint8_t i = 0; i < cmp_len; i++) {
-        if (uart1_cmp_buf[i] != rf_cmp_buf[i]) {
+    for (uint8_t i = 0; i < cmp_len; i++) 
+    {
+        if (uart1_cmp_buf[i] != rf_cmp_buf[i]) 
+        {
             match = 0;
             break;
         }
     }
 
-    if (match && uart1_cmp_len == rf_cmp_len) {
+    if (match && uart1_cmp_len == rf_cmp_len) 
+    {
         uart0_send_string("PASS: 数据一致\r\n");
-    } else {
+    } else 
+    {
         uart0_send_string("FAIL: 数据不一致\r\n");
         // 打印对比详情
         char msg[128];
         snprintf(msg, sizeof(msg), "UART1[%d]: ", uart1_cmp_len);
         uart0_send_string(msg);
-        for (uint8_t i = 0; i < uart1_cmp_len; i++) {
+        for (uint8_t i = 0; i < uart1_cmp_len; i++) 
+        {
             snprintf(msg, sizeof(msg), "0x%02X ", uart1_cmp_buf[i]);
             uart0_send_string(msg);
         }
         uart0_send_string("\r\n");
         snprintf(msg, sizeof(msg), "RF[%d]:    ", rf_cmp_len);
         uart0_send_string(msg);
-        for (uint8_t i = 0; i < rf_cmp_len; i++) {
+        for (uint8_t i = 0; i < rf_cmp_len; i++) 
+        {
             snprintf(msg, sizeof(msg), "0x%02X ", rf_cmp_buf[i]);
             uart0_send_string(msg);
         }
@@ -208,7 +213,7 @@ static void reset_compare_state(void)
 
 
 
-// 按键重置任务 - GPIO3/GPIO4 按下时重置
+// 按键重置任务 
 static void button_reset_task(void *pvParameters)
 {
     printf("按键重置任务启动 (GPIO%d, GPIO%d)\n", CONTROL_GPIO_NUM1, CONTROL_GPIO_NUM2);
@@ -243,14 +248,18 @@ static void wakeup_gpio_set_level(uint32_t level)
 #define PIN_ACTIVE   1   // 激活状态
 #define PIN_STANDBY  0   // 待机状态
 
-// 检测引脚定义（避开 A7169 片选 GPIO5，改用 GPIO8）
-#define DETECT_GPIO_NUM    GPIO_NUM_8
+// 检测引脚定义（注意：不能使用 A7169 占用的引脚：GPIO8/9/10/11）
+#define DETECT_GPIO_NUM    GPIO_NUM_5  // ⚠️ 与 A7169_CLK 冲突！需要改为其他引脚
+
+// A7169 GIO1 中断引脚定义 (GPIO10)
+#define A7169_GIO1_IRQ_PIN  GPIO_NUM_10
 
 // 任务句柄
 static TaskHandle_t xDetectTaskHandle = NULL;
 static TaskHandle_t xWorkerTaskHandle = NULL;
+static TaskHandle_t xRfRecvTaskHandle = NULL;  // 433 RF接收任务句柄
 
-// 引脚检测任务 - 读取电平并通知其他任务
+// 引脚检测任务
 static void pin_detect_task(void *pvParameters)
 {
     uint8_t lastState = PIN_STANDBY;
@@ -268,7 +277,7 @@ static void pin_detect_task(void *pvParameters)
 
     printf("引脚检测任务启动 (GPIO%d)\n", DETECT_GPIO_NUM);
 
-    // 读取初始电平，同步 lastState 并发送初始通知
+    // 读取初始电平
     uint8_t initLevel = gpio_get_level(DETECT_GPIO_NUM);
     lastState = initLevel;
     if (initLevel == 1) {
@@ -323,17 +332,42 @@ static void worker_up_task(void *pvParameters)
                 printf(">>> 收到待机通知，进入待机状态\n");
                 wakeup_gpio_set_level(0);  // 设置唤醒引脚为低电平
                 xEventGroupClearBits(xEventFlags, UART1_ENABLE_BIT | RF_ENABLE_BIT);  // 失能 UART1 和 433接收模式
-
             }
         }
     }
 }
-
-
 //两路开关引脚读取
 static uint8_t control_gpio_read_level(uint8_t gpio_num)
 {
     return gpio_get_level(gpio_num);
+}
+
+// GPIO10 中断服务程序 (A7169 GIO1)
+static void IRAM_ATTR gpio10_isr_handler(void* arg)
+{
+    state=1;
+    
+    if (xRfRecvTaskHandle != NULL) 
+    {
+        xTaskNotifyFromISR(xRfRecvTaskHandle, 1, eSetValueWithOverwrite, NULL);
+    }
+}
+
+// 初始化 GPIO10 为中断模式
+static void GPIO10_IRQ_INIT(void)
+{
+    gpio_config_t io_conf = {
+        .pin_bit_mask = (1ULL << A7169_GIO1_IRQ_PIN),
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_ENABLE,
+        .intr_type = GPIO_INTR_NEGEDGE  // 下降沿触发中断
+    };
+    gpio_config(&io_conf);
+    gpio_install_isr_service(0);
+    gpio_isr_handler_add(A7169_GIO1_IRQ_PIN, gpio10_isr_handler, (void*) A7169_GIO1_IRQ_PIN);
+
+    printf("GPIO10 中断初始化完成 (A7169 GIO1, 下降沿触发)\n");
 }
 
 //传感器数据接收函数
@@ -341,17 +375,18 @@ static void uart1_event_task(void *pvParameters)
 {
     uart_event_t event;
     uint8_t data[BUF_SIZE];
-
-    while (1) {
+    while (1) 
+    {
         // 等待UART事件
-        if (xQueueReceive(uart1_queue, &event, portMAX_DELAY)) {
+        if (xQueueReceive(uart1_queue, &event, portMAX_DELAY)) 
+        {
             // 未使能时丢弃数据，不处理
             if (!(xEventGroupGetBits(xEventFlags) & UART1_ENABLE_BIT)) continue;
             memset(data, 0, sizeof(data));
-
-            switch (event.type) {
+            switch (event.type) 
+            {
                 case UART_DATA:  // 收到数据
-                    // 读取数据（防止越界）
+                    // 读取数据
                     if (event.size >= BUF_SIZE) event.size = BUF_SIZE - 1;
                     uart_read_bytes(UART1_PORT, data, event.size, pdMS_TO_TICKS(100));
                     data[event.size] = '\0';
@@ -414,22 +449,25 @@ static void uart1_event_task(void *pvParameters)
     vTaskDelete(NULL);
 }
 
-// 433 RF 数据接收任务
+// 433 RF 数据接收任务 (中断方式)
 static void rf_recv_task(void *pvParameters)
 {
     uint8_t rf_buf[64];
+    uint32_t notify_value;
 
-    printf("433 RF 接收任务启动\n");
+    printf("433 RF 接收任务启动 (中断模式)\n");
 
     while (1) {
-        if (!(xEventGroupGetBits(xEventFlags) & RF_ENABLE_BIT)) {
+        if (!(xEventGroupGetBits(xEventFlags) & RF_ENABLE_BIT))
+        {
             vTaskDelay(pdMS_TO_TICKS(50));
             continue;
         }
 
-        // 检查 GIO1S 引脚，高电平表示收到数据
-        if (GIO1S) 
+        // 等待 GPIO10 中断通知 (超时 100ms)
+        if (xTaskNotifyWait(0, 0, &notify_value, pdMS_TO_TICKS(100)) == pdTRUE)
         {
+            // 收到中断通知，读取数据
             uint8_t len = A7169_GetData(rf_buf, 11);
             if (len > 0)
             {
@@ -447,8 +485,6 @@ static void rf_recv_task(void *pvParameters)
                 compare_and_report();
             }
         }
-
-        vTaskDelay(pdMS_TO_TICKS(10));
     }
 }
 void app_main(void)
@@ -459,32 +495,24 @@ void app_main(void)
 
     // 创建事件标志组 存放各种状态标志位
     xEventFlags = xEventGroupCreate();
-
-    // 初始化 433 RF 模块
     if (InitRF() == 0) {
         printf("433 RF 初始化成功\n");
     } else {
         printf("433 RF 初始化失败\n");
     }
-    // xTaskCreate(uart1_event_task, "uart1_event_task", 4096, NULL, 12, NULL);   //接收传感器数据
-    // xTaskCreate(rf_recv_task, "rf_recv", 4096, NULL, 9, NULL);                 //接收433数据
-    // xTaskCreate(worker_up_task, "worker_up", 2048, NULL, 8, &xWorkerTaskHandle);
-    // xTaskCreate(pin_detect_task, "pin_detect", 2048, NULL, 10, &xDetectTaskHandle);
-    // xTaskCreate(button_reset_task, "btn_reset", 2048, NULL, 7, NULL);
-    // 主循环
+    GPIO10_IRQ_INIT();
+    xTaskCreate(rf_recv_task, "rf_recv", 4096, NULL, 9, &xRfRecvTaskHandle);
+    xTaskCreate(uart1_event_task, "uart1_event", 4096, NULL, 8, NULL);
+    xTaskCreate(worker_up_task, "worker_up", 2048, NULL, 6, &xWorkerTaskHandle);
+    xTaskCreate(pin_detect_task, "pin_detect", 2048, NULL, 7, &xDetectTaskHandle);
+    xTaskCreate(button_reset_task, "button_reset", 2048, NULL, 5, NULL);
+    // 设置唤醒引脚为高电平，通知进入工作状态
+    xEventGroupSetBits(xEventFlags, RF_ENABLE_BIT);
+
+
     while (1)
     {
-        uint8_t state = A7169_GetData(rf_cmp_buf, 11);
-        if (state > 0)
-        {
-            printf("433 收到 %d 字节: ", state);
-            for (int i = 0; i < state; i++)
-            {
-                printf("0x%02X ", rf_cmp_buf[i]);
-            }
-            printf("\n");
-        }
-      
-        vTaskDelay(pdMS_TO_TICKS(100));  // 延时2秒
+        // 主循环空闲，数据接收由 rf_recv_task 通过中断方式处理
+        vTaskDelay(pdMS_TO_TICKS(1000));
     }
 }

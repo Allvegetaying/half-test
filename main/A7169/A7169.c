@@ -1139,7 +1139,7 @@ uint8_t InitRF(void)
 
     if(A7169_Cal())         //IF and VCO Calibration
         return 1;
-    A7169_WritePageA(GIO_PAGEA, (A7169Config_PageA[GIO_PAGEA] & 0xF000) | 0x0045);  //GIO1=FSYNC, GIO2=WTR
+    A7169_WritePageA(GIO_PAGEA, A7169Config_PageA[GIO_PAGEA]);  //GIO1=WTR
     A7169_StrobeCmd(CMD_RX);
     // RSSI_Measurement();
     RF_Init_Flg = true;
@@ -1579,9 +1579,6 @@ uint8_t A7169_GetData(uint8_t *buf, int len)
     int decoded_len = len + 1;
 
 //    rssi = RSSI_Measurement();
-    // if (GIO1S == 0)
-    //     return 0;
-
     static uint8_t data[64] = {0};
     memset(data, 0, sizeof(data));
 	memset(tmpbuf,0,sizeof(tmpbuf));
