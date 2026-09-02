@@ -51,10 +51,9 @@ static EventGroupHandle_t xEventFlags;
 #define RF_DATA_READY      (1 << 3)   // 433 数据就绪
 
 // 数据对比缓冲区
-static uint8_t uart1_cmp_buf[64];
-static uint8_t uart1_cmp_len = 0;
-static uint8_t rf_cmp_buf[64];
-static uint8_t rf_cmp_len = 0;
+#define RF_ID_HEX_LEN 8
+static char uart1_chip_id[PROTO_CHIP_ID_MAX + 1];
+static char rf_chip_id[RF_ID_HEX_LEN + 1];
 
 // 函数声明
 static uint8_t control_gpio_read_level(uint8_t gpio_num);
@@ -143,71 +142,57 @@ static void uart0_send_string(const char* str)
     uart_write_bytes(UART0_PORT, str, strlen(str));
 }
 
+static char hex_upper(char c)
+{
+    if (c >= 'a' && c <= 'f')
+        return (char)(c - 'a' + 'A');
+    return c;
+}
+
+static int id_matches_rf_id(const char *uart_id, const char *rf_id)
+{
+    size_t uart_len = strlen(uart_id);
+    const char *uart_cmp = uart_id;
+
+    if (uart_len > RF_ID_HEX_LEN)
+        uart_cmp = uart_id + uart_len - RF_ID_HEX_LEN;
+    else if (uart_len != RF_ID_HEX_LEN)
+        return 0;
+
+    for (int i = 0; i < RF_ID_HEX_LEN; i++) {
+        if (hex_upper(uart_cmp[i]) != hex_upper(rf_id[i]))
+            return 0;
+    }
+
+    return 1;
+}
+
 // 数据对比与结果上报
 static void compare_and_report(void)
 {
-    // 两边数据都就绪才对比
     EventBits_t bits = xEventGroupGetBits(xEventFlags);
     if (!(bits & UART1_DATA_READY) || !(bits & RF_DATA_READY))
         return;
 
-    // 取最小长度对比
-    uint8_t cmp_len = (uart1_cmp_len < rf_cmp_len) ? uart1_cmp_len : rf_cmp_len;
+    uint8_t result = id_matches_rf_id(uart1_chip_id, rf_chip_id) ? 0 : 1;
+    char frame[96];
 
-    if (cmp_len == 0) {
-        uart0_send_string("FAIL: 数据长度为0\r\n");
-        goto clear;
-    }
+    if (proto_build_semi_result(frame, sizeof(frame), uart1_chip_id, result) > 0)
+        uart0_send_string(frame);
 
-    // 逐字节对比
-    int match = 1;
-    for (uint8_t i = 0; i < cmp_len; i++) 
-    {
-        if (uart1_cmp_buf[i] != rf_cmp_buf[i]) 
-        {
-            match = 0;
-            break;
-        }
-    }
+    printf("SEMI_RESULT UART_ID=%s RF_ID=%s RESULT=%u\n",
+           uart1_chip_id, rf_chip_id, result);
 
-    if (match && uart1_cmp_len == rf_cmp_len) 
-    {
-        uart0_send_string("PASS: 数据一致\r\n");
-    } else 
-    {
-        uart0_send_string("FAIL: 数据不一致\r\n");
-        // 打印对比详情
-        char msg[128];
-        snprintf(msg, sizeof(msg), "UART1[%d]: ", uart1_cmp_len);
-        uart0_send_string(msg);
-        for (uint8_t i = 0; i < uart1_cmp_len; i++) 
-        {
-            snprintf(msg, sizeof(msg), "0x%02X ", uart1_cmp_buf[i]);
-            uart0_send_string(msg);
-        }
-        uart0_send_string("\r\n");
-        snprintf(msg, sizeof(msg), "RF[%d]:    ", rf_cmp_len);
-        uart0_send_string(msg);
-        for (uint8_t i = 0; i < rf_cmp_len; i++) 
-        {
-            snprintf(msg, sizeof(msg), "0x%02X ", rf_cmp_buf[i]);
-            uart0_send_string(msg);
-        }
-        uart0_send_string("\r\n");
-    }
-
-clear:
-    // 清除就绪标志，等待下一轮数据
+    uart1_chip_id[0] = '\0';
+    rf_chip_id[0] = '\0';
     xEventGroupClearBits(xEventFlags, UART1_DATA_READY | RF_DATA_READY);
 }
 
 // 重置对比状态，准备下一轮检测
 static void reset_compare_state(void)
 {
-    memset(uart1_cmp_buf, 0, sizeof(uart1_cmp_buf));
-    uart1_cmp_len = 0;
-    memset(rf_cmp_buf, 0, sizeof(rf_cmp_buf));
-    rf_cmp_len = 0;
+    uart1_chip_id[0] = '\0';
+    rf_chip_id[0] = '\0';
     xEventGroupClearBits(xEventFlags, UART1_DATA_READY | RF_DATA_READY);
     uart0_send_string("RESET: 已重置，等待下一轮检测\r\n");
 }
@@ -389,10 +374,8 @@ static void on_uart1_frame(const char *line, void *ctx)
            st.model, st.chip_id, st.press, st.temp, st.acc_z, st.bat_v);
 
     // 原始帧存入对比缓冲区（沿用原 64 字节上限与对比流程），标记就绪
-    size_t n = strlen(line);
-    if (n > 64) n = 64;
-    uart1_cmp_len = (uint8_t)n;
-    memcpy(uart1_cmp_buf, line, n);
+    strncpy(uart1_chip_id, st.chip_id, sizeof(uart1_chip_id) - 1);
+    uart1_chip_id[sizeof(uart1_chip_id) - 1] = '\0';
     xEventGroupSetBits(xEventFlags, UART1_DATA_READY);
     compare_and_report();
 }
@@ -419,7 +402,6 @@ static void uart1_event_task(void *pvParameters)
                     uart_read_bytes(UART1_PORT, data, event.size, pdMS_TO_TICKS(100));
                     data[event.size] = '\0';
 
-                    // 调试：打印原始数据
                     printf("收到 %d 字节: ", event.size);
                     for (int i = 0; i < event.size; i++) {
                         printf("[%d]=%d(0x%02X) ", i, data[i], data[i]);
@@ -477,7 +459,7 @@ static void rf_recv_task(void *pvParameters)
         if (xTaskNotifyWait(0, 0, &notify_value, pdMS_TO_TICKS(100)) == pdTRUE)
         {
             // 收到中断通知，读取数据
-            uint8_t len = A7169_GetData(rf_buf, 11);
+            uint8_t len = A7169_GetData(rf_buf, RF_NORMAL_FRAME_LEN - 1);
             if (len > 0)
             {
                 printf("433 收到 %d 字节: ", len);
@@ -487,11 +469,24 @@ static void rf_recv_task(void *pvParameters)
                 }
                 printf("\n");
 
-                // 存入对比缓冲区，标记就绪
-                rf_cmp_len = (len < 64) ? len : 64;
-                memcpy(rf_cmp_buf, rf_buf, rf_cmp_len);
-                xEventGroupSetBits(xEventFlags, RF_DATA_READY);
-                compare_and_report();
+                rf_normal_data_t rf_data;
+                if (A7169_ParseNormalData(rf_buf, len, &rf_data))
+                {
+                    printf("433 normal data: ID=%08" PRIX32
+                           " ACC=%.1fg TEMP=%dC PRESS=%.1fkPa "
+                           "vendor=0x%02X type=0x%02X status=0x%02X\n",
+                           rf_data.sensor_id,
+                           rf_data.acceleration_g,
+                           rf_data.temperature_c,
+                           rf_data.pressure_kpa,
+                           rf_data.vendor_type,
+                           rf_data.sensor_type,
+                           rf_data.status);
+
+                    snprintf(rf_chip_id, sizeof(rf_chip_id), "%08" PRIX32, rf_data.sensor_id);
+                    xEventGroupSetBits(xEventFlags, RF_DATA_READY);
+                    compare_and_report();
+                }
             }
         }
     }

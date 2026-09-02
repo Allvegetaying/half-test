@@ -1572,11 +1572,50 @@ uint8_t xor_check8(uint8_t *buf, uint8_t len)
 	return x;
 }
 
+static uint8_t rf_is_supported_vendor(uint8_t vendor)
+{
+    return vendor == 0x01 || vendor == 0x0F;
+}
+
+static uint8_t rf_is_supported_sensor_type(uint8_t sensor_type)
+{
+    return sensor_type == 0x01 || sensor_type == 0x02 || sensor_type == 0x06;
+}
+
+uint8_t A7169_ParseNormalData(const uint8_t *data, uint8_t len, rf_normal_data_t *out)
+{
+    if (!data || len != RF_NORMAL_FRAME_LEN)
+        return 0;
+
+    if (!rf_is_supported_vendor(data[0]) || !rf_is_supported_sensor_type(data[1]))
+        return 0;
+
+    uint16_t crc16 = CRC16(data, 10);
+    if (data[10] != (uint8_t)(crc16 >> 8) || data[11] != (uint8_t)crc16)
+        return 0;
+
+    if (out) {
+        out->vendor_type = data[0];
+        out->sensor_type = data[1];
+        out->sensor_id = ((uint32_t)data[2] << 24) | ((uint32_t)data[3] << 16) | ((uint32_t)data[4] << 8) | (uint32_t)data[5];
+        out->acceleration_raw = data[6];
+        out->temperature_raw = data[7];
+        out->pressure_raw = data[8];
+        out->status = data[9];
+        out->acceleration_g = ((int8_t)data[6]) * 0.2f;
+        out->temperature_c = (int16_t)data[7] - 50;
+        out->pressure_kpa = (data[9] & 0x80) ? (1402.0f + data[8] * 5.5f) : (100.0f + data[8] * 5.5f);
+    }
+
+    return 1;
+}
+
 
 uint8_t A7169_GetData(uint8_t *buf, int len)
 {
     uint8_t res = 0;
-    int decoded_len = len + 1;
+    int decoded_len = RF_NORMAL_FRAME_LEN;
+    (void)len;
 
 //    rssi = RSSI_Measurement();
     static uint8_t data[64] = {0};
@@ -1591,7 +1630,6 @@ uint8_t A7169_GetData(uint8_t *buf, int len)
         tmpbuf[i] = A7169_ReadByte();
 
     A7169_CS_H();
-    uint8_t crc8 = 0;
 //    printf("test: ");
 //    for(int i= 0;i<11*2;i++)
 //    	printf("%x ",tmpbuf[i]);
@@ -1609,64 +1647,13 @@ uint8_t A7169_GetData(uint8_t *buf, int len)
         A7169_StrobeCmd(CMD_RX);
         return 0;
     }
-    uint8_t xor = 0;
-	uint16_t crc16 = 0;
-	crc16 = CRC16(data, 10);
-    
-
-	// if(data[10] == (crc16>>8) && (data[11] == (uint8_t)crc16) && crc16!=0  && (data[9]&0x20) == 0x20)//&& data[11] == crc16
-    if(data[10] == (crc16>>8) && (data[11] == (uint8_t)crc16) && crc16!=0 )//&& data[11] == crc16
+    if(A7169_ParseNormalData(data, RF_NORMAL_FRAME_LEN, NULL))
 	{
-		memcpy(buf, data, 12);
-        res = 12;
+		memcpy(buf, data, RF_NORMAL_FRAME_LEN);
+        res = RF_NORMAL_FRAME_LEN;
         A7169_StrobeCmd(CMD_RX);
         return res;
 	}
-	crc16 = CRC16(data, 9);
-	if(data[9] == (crc16>>8) && (data[10] == (uint8_t)crc16) && crc16!=0 && data[6] == 0x03) //10位数据 软件版本 \电量查询
-	{
-		memcpy(buf, data, 10);
-		res = 10;
-		A7169_StrobeCmd(CMD_RX);
-		return res;
-	}
-    crc8 = CRC8(data, 10);
-
-    if(data[10] == crc8 && crc8 != 0 && (data[9]&0x20) == 0x20) //11位数据 其他厂商数据
-    {
-        memcpy(buf, data, 11);
-        res = 11;
-        A7169_StrobeCmd(CMD_RX);
-        return res;
-    }
-
-
-    crc8 = CRC8(data, 9);
-    if(data[9] == crc8 && crc8 != 0 && data[6] == 0x03) //10位数据 软件版本 \电量查询
-    {
-        memcpy(buf, data, 10);
-        res = 10;
-        A7169_StrobeCmd(CMD_RX);
-        return res;
-    }
-
-    xor = xor_check8(data,7);
-	if(xor == data[7] && xor != 0 && data[0] != 0x0f && (data[5]&0x10) == 0x10 )
-	{
-		memcpy(buf, data, 8);
-		res = 9;//万通
-		A7169_StrobeCmd(CMD_RX);
-		return res;
-	}
-    crc8 = CRC8(data, 7);
-    if(crc8 == data[7] && crc8 != 0 && (data[6]&0x20) == 0x20 && data[0] != 0x0f) //8位数据 万通
-    {
-        memcpy(buf, data, 8);
-        res = 8;
-        A7169_StrobeCmd(CMD_RX);
-        return res;
-    }
-
     A7169_StrobeCmd(CMD_RX);
     return res;
 }

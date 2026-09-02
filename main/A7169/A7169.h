@@ -39,8 +39,25 @@
 #define A7169_InMode() 	 				MOSI_MODE_INPUT   //DIOÊäÈë
 #define GIO1S                   GIOD_READ
 //#define GIO2S                  	GPIO_Pin_read(GPIO2)
+
+#define RF_NORMAL_FRAME_LEN     12
+
+typedef struct {
+    uint8_t vendor_type;
+    uint8_t sensor_type;
+    uint32_t sensor_id;
+    uint8_t acceleration_raw;
+    uint8_t temperature_raw;
+    uint8_t pressure_raw;
+    uint8_t status;
+    float acceleration_g;
+    int16_t temperature_c;
+    float pressure_kpa;
+} rf_normal_data_t;
+
 void entry_deep_sleep_mode(void);
 void wake_up_from_deep_sleep_mode(void);
+uint8_t A7169_ParseNormalData(const uint8_t *data, uint8_t len, rf_normal_data_t *out);
 uint8_t A7169_GetData(uint8_t *buf,int len);
 void RxPacket(void);
 uint8_t InitRF(void);

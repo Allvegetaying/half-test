@@ -63,15 +63,28 @@ static int split_tokens(const char *line)
     return n;
 }
 
+/* CHIP_ID 固定 4 字节 = 8 位 hex：长度必须恰好 8 且全为 hex 字符 */
+static int chip_id_is_valid(const char *s)
+{
+    int i;
+    for (i = 0; s[i] != '\0'; i++) {
+        char c = s[i];
+        if (!((c >= '0' && c <= '9') || (c >= 'A' && c <= 'F') || (c >= 'a' && c <= 'f')))
+            return 0;
+    }
+    return (i == PROTO_CHIP_ID_MAX);
+}
+
 int proto_parse_semi(const char *line, proto_semi_t *out)
 {
     int n = split_tokens(line);
 
-    if (!out || n < 7 || strcmp(toks[1], "SEMI_TEST") != 0)
+    if (!out || n < 7 || strcmp(toks[1], "SEMI_TEST") != 0 || !chip_id_is_valid(toks[2]))
         return -1;
 
     /* 字段索引：0=model 1=cmd 2=chip 3=press 4=temp 5=acc_z 6=bat_v */
-    snprintf(out->model, sizeof(out->model), "%s", toks[0]);
+    strncpy(out->model, toks[0], sizeof(out->model) - 1);
+    out->model[sizeof(out->model) - 1] = '\0';
     strncpy(out->chip_id, toks[2], PROTO_CHIP_ID_MAX);
     out->chip_id[PROTO_CHIP_ID_MAX] = '\0';
     out->press = strtof(toks[3], NULL);
@@ -79,6 +92,32 @@ int proto_parse_semi(const char *line, proto_semi_t *out)
     out->acc_z = strtof(toks[5], NULL);
     out->bat_v = strtof(toks[6], NULL);
     return 0;
+}
+
+int proto_build_semi_result(char *out, size_t out_size, const char *chip_id, uint8_t result)
+{
+    char body[PROTO_FRAME_MAX + 1];
+    char safe_chip_id[PROTO_CHIP_ID_MAX + 1];
+    int body_len;
+    int frame_len;
+
+    if (!out || !chip_id || out_size == 0)
+        return -1;
+
+    strncpy(safe_chip_id, chip_id, sizeof(safe_chip_id) - 1);
+    safe_chip_id[sizeof(safe_chip_id) - 1] = '\0';
+
+    body_len = snprintf(body, sizeof(body), "TPMS_S01,SEMI_RESULT,%s,%u",
+                        safe_chip_id, result ? 1 : 0);
+    if (body_len < 0 || body_len >= (int)sizeof(body))
+        return -1;
+
+    uint16_t crc = CRC16((const uint8_t *)body, body_len);
+    frame_len = snprintf(out, out_size, "$%s,%04X#\r\n", body, crc);
+    if (frame_len < 0 || frame_len >= (int)out_size)
+        return -1;
+
+    return frame_len;
 }
 
 /* ---------------------------------------------------------------------
