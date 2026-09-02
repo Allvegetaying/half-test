@@ -1,0 +1,49 @@
+#ifndef PROTOCOL_H
+#define PROTOCOL_H
+
+#include <stdint.h>
+#include <stdbool.h>
+
+/* 半成品检测（SEMI_TEST）串口 ASCII 帧解析
+ *
+ * 帧格式：$<型号>,SEMI_TEST,<CHIP_ID>,<PRESS>,<TEMP>,<ACC_Z>,<BAT_V>,<CRC16>#\r\n
+ *
+ * CRC16 校验：复用 A7169/blt_gpio.h 里现成的 CRC16() 函数（原样使用，不改动），
+ *             校验范围是 '$' 之后、最后一个 ',' 之间的 ASCII，结果高字节在前。 */
+
+#define PROTO_FRAME_MAX      200     /* 单帧最长（含 $ 与 #） */
+#define PROTO_MODEL_MAX       32
+#define PROTO_CHIP_ID_MAX     12     /* CHIP_ID 固定 12 位 hex */
+#define PROTO_TOKEN_MAX       16     /* 一帧最多字段数 */
+
+/* SEMI_TEST 解析结果 */
+typedef struct {
+    char  model[PROTO_MODEL_MAX];
+    char  chip_id[PROTO_CHIP_ID_MAX + 1];   /* 12 位 hex + '\0' */
+    float press;   /* kPa */
+    float temp;    /* ℃   */
+    float acc_z;   /* g   */
+    float bat_v;   /* V   */
+} proto_semi_t;
+
+/* 字节流分帧器状态 */
+typedef struct {
+    char     buf[PROTO_FRAME_MAX + 1];
+    uint16_t len;
+} proto_rx_t;
+
+/* 完整帧回调：line 指向一帧 "$...#"，'\0' 结尾（不含尾部 \r\n） */
+typedef void (*proto_frame_cb)(const char *line, void *ctx);
+
+/* 校验一帧 CRC（复用 CRC16()：'$' 之后到最后 ',' 之间，高字节在前）。
+ * 返回 0=通过，-1=失败；失败时 *calc_out 带回计算值，便于定位 DUT 实际算法。 */
+int proto_crc_check(const char *line, uint16_t *calc_out);
+
+/* 解析 SEMI_TEST 业务字段；返回 0=成功，-1=失败（含非 SEMI_TEST 帧） */
+int proto_parse_semi(const char *line, proto_semi_t *out);
+
+/* 喂入原始字节流，切出 "$...#" 完整帧并逐帧回调；返回本批切出的帧数 */
+int proto_rx_feed(proto_rx_t *rx, const uint8_t *data, int len,
+                  proto_frame_cb cb, void *ctx);
+
+#endif /* PROTOCOL_H */

@@ -17,6 +17,7 @@
 #include "driver/uart.h"
 #include "string.h"
 #include "A7169/A7169.h"
+#include "protocol.h"
 
 // GPIO2 引脚定义
 #define WAKEUP_GPIO_NUM      GPIO_NUM_2
@@ -211,8 +212,6 @@ static void reset_compare_state(void)
     uart0_send_string("RESET: 已重置，等待下一轮检测\r\n");
 }
 
-
-
 // 按键重置任务 
 static void button_reset_task(void *pvParameters)
 {
@@ -279,7 +278,7 @@ static void pin_detect_task(void *pvParameters)
     // 读取初始电平
     uint8_t initLevel = gpio_get_level(DETECT_GPIO_NUM);
     lastState = initLevel;
-    if (initLevel == 1) {
+    if (initLevel == 0) {
         printf("初始状态：高电平 -> 通知激活\n");
         xTaskNotify(xWorkerTaskHandle, PIN_ACTIVE, eSetValueWithOverwrite);
     } else {
@@ -295,7 +294,7 @@ static void pin_detect_task(void *pvParameters)
         // 状态变化时才通知
         if (currentState != lastState) 
         {
-            if (currentState == 1) 
+            if (currentState == 0) 
             {
                 printf("检测到高电平 -> 通知激活\n");
                 // 发送激活通知
@@ -316,7 +315,8 @@ static void worker_up_task(void *pvParameters)
 {
     uint32_t state = PIN_STANDBY;
     printf("工作任务启动，等待通知...\n");
-    while (1) {
+    while (1) 
+    {
         // 等待任务通知
         if (xTaskNotifyWait(0, 0, &state, portMAX_DELAY) == pdTRUE) 
         {
@@ -368,11 +368,41 @@ static void GPIO10_IRQ_INIT(void)
     printf("GPIO10 中断初始化完成 (A7169 GIO1, 下降沿触发)\n");
 }
 
+// UART1 ASCII 帧回调节点：CRC 校验 + SEMI_TEST 解析 + 按原流程入对比缓冲
+// 帧解析逻辑见 main/protocol/（protocol.h / protocol.c）
+static void on_uart1_frame(const char *line, void *ctx)
+{
+    (void)ctx;
+    uint16_t calc = 0;
+    if (proto_crc_check(line, &calc) != 0) {
+        printf("UART1 CRC 校验失败 (计算值 0x%04X): %s\n", calc, line);
+        return;
+    }
+
+    proto_semi_t st;
+    if (proto_parse_semi(line, &st) != 0) {
+        printf("UART1 非 SEMI_TEST 或解析失败: %s\n", line);
+        return;
+    }
+
+    printf("UART1 解析: MODEL=%s CHIP_ID=%s PRESS=%.1f TEMP=%.1f ACC_Z=%.2f BAT_V=%.2f\n",
+           st.model, st.chip_id, st.press, st.temp, st.acc_z, st.bat_v);
+
+    // 原始帧存入对比缓冲区（沿用原 64 字节上限与对比流程），标记就绪
+    size_t n = strlen(line);
+    if (n > 64) n = 64;
+    uart1_cmp_len = (uint8_t)n;
+    memcpy(uart1_cmp_buf, line, n);
+    xEventGroupSetBits(xEventFlags, UART1_DATA_READY);
+    compare_and_report();
+}
+
 //传感器数据接收函数
 static void uart1_event_task(void *pvParameters)
 {
     uart_event_t event;
     uint8_t data[BUF_SIZE];
+    static proto_rx_t uart1_rx;   // 串口协议分帧器（跨事件保存残余字节）
     while (1) 
     {
         // 等待UART事件
@@ -396,27 +426,8 @@ static void uart1_event_task(void *pvParameters)
                     }
                     printf("\n");
 
-                    if(event.size < 5)
-                    {
-                        // printf("数据不足5字节，跳过解析\n");
-                        break;
-                    }
-
-                    // 解析数据
-                    uint8_t ID = data[0];           //ID
-                    uint8_t stress = data[1];       //压力
-                    uint8_t temperature = data[2];  // 温度
-                    uint8_t acceleration = data[3]; // 加速度
-                    uint8_t battery_voltage = data[4]; // 电池电压
-
-                    printf("解析: ID=%d, 压力=%d, 温度=%d, 加速度=%d, 电池电压=%d\n",
-                           ID, stress, temperature, acceleration, battery_voltage);
-
-                    // 存入对比缓冲区，标记就绪
-                    uart1_cmp_len = (event.size < 64) ? event.size : 64;
-                    memcpy(uart1_cmp_buf, data, uart1_cmp_len);
-                    xEventGroupSetBits(xEventFlags, UART1_DATA_READY);
-                    compare_and_report();
+                    // 送入协议分帧器；每收到完整 "$...#" 帧回调 on_uart1_frame()
+                    proto_rx_feed(&uart1_rx, data, event.size, on_uart1_frame, NULL);
                     break;
                 case UART_FIFO_OVF:  // FIFO溢出
                     printf("UART1 FIFO 溢出\n");
