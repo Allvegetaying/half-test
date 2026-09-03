@@ -414,8 +414,6 @@ static void GPIO10_IRQ_INIT(void)
     printf("GPIO10 中断初始化完成 (A7169 GIO1, 下降沿触发)\n");
 }
 
-// UART1 ASCII 帧回调节点：CRC 校验 + SEMI_TEST 解析 + 按原流程入对比缓冲
-// 帧解析逻辑见 main/protocol/（protocol.h / protocol.c）
 static void on_uart1_frame(const char *line, void *ctx)
 {
     (void)ctx;
@@ -436,7 +434,7 @@ static void on_uart1_frame(const char *line, void *ctx)
     printf("UART1 解析: MODEL=%s CHIP_ID=%s PRESS=%.1f TEMP=%.1f ACC_Z=%.2f BAT_V=%.2f\n",
            st.model, st.chip_id, st.press, st.temp, st.acc_z, st.bat_v);
 
-    // 原始帧存入对比缓冲区（沿用原 64 字节上限与对比流程），标记就绪
+    // 原始帧存入对比缓冲区
     strncpy(uart1_chip_id, st.chip_id, sizeof(uart1_chip_id) - 1);
     uart1_chip_id[sizeof(uart1_chip_id) - 1] = '\0';
     xEventGroupSetBits(xEventFlags, UART1_DATA_READY);
@@ -449,7 +447,7 @@ static void uart1_event_task(void *pvParameters)
 {
     uart_event_t event;
     uint8_t data[BUF_SIZE];
-    static proto_rx_t uart1_rx;   // 串口协议分帧器（跨事件保存残余字节）
+    static proto_rx_t uart1_rx;   // 串口协议分帧器
     while (1) 
     {
         // 等待UART事件
