@@ -86,7 +86,7 @@ void GPIO_INIT()
     //初始化GPIO40
     gpio_config_t io_conf3 = {
         .pin_bit_mask = (1ULL << GPIO_NUM_40),
-        .mode = GPIO_MODE_OUTPUT_OD,
+        .mode = GPIO_MODE_OUTPUT,
         .pull_up_en = GPIO_PULLUP_ENABLE,
         .pull_down_en = GPIO_PULLDOWN_DISABLE,
         .intr_type = GPIO_INTR_DISABLE
@@ -212,8 +212,9 @@ static void button_reset_task(void *pvParameters)
 
 static void uart1_restore_rx_pin(void)
 {
-    uart_set_pin(UART1_PORT, UART1_TX_PIN, UART1_RX_PIN,
-                 UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
+     uart_set_pin(UART1_PORT, UART1_TX_PIN, UART1_RX_PIN, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
+    //  gpio_pullup_en(UART1_RX_PIN);
+    // gpio_pulldown_dis(UART1_RX_PIN);
 }
 
 //唤醒/传感器TX共线脚控制：拉低时切 GPIO 开漏输出，释放时恢复 UART RX
@@ -234,7 +235,7 @@ static void wakeup_gpio_set_level(uint32_t level)
         return;
     }
 
-    gpio_set_level(WAKEUP_GPIO_NUM, 1);
+    // gpio_set_level(WAKEUP_GPIO_NUM, 1);
     uart1_restore_rx_pin();
     uart_enable_rx_intr(UART1_PORT);
 }
@@ -297,7 +298,6 @@ static void pin_detect_task(void *pvParameters)
     {
         // 读取引脚电平
         uint8_t currentState = gpio_get_level(DETECT_GPIO_NUM);
-
         // 状态变化时才通知
         if (currentState != lastState)
         {
@@ -306,14 +306,14 @@ static void pin_detect_task(void *pvParameters)
                 printf("GPIO%d 变0 -> 通知激活\n", DETECT_GPIO_NUM);
                 // 发送激活通知
                 xTaskNotify(xWorkerTaskHandle, PIN_ACTIVE, eSetValueWithOverwrite);
-            } else
+            } 
+            else
             {
                 printf("GPIO%d 变1 -> 通知待机\n", DETECT_GPIO_NUM);
                 xTaskNotify(xWorkerTaskHandle, PIN_STANDBY, eSetValueWithOverwrite);
             }
             lastState = currentState;
         }
-
         vTaskDelay(pdMS_TO_TICKS(50));  // 50ms 检测一次
     }
 }
@@ -321,15 +321,11 @@ static void pin_detect_task(void *pvParameters)
 // 传感器唤醒序列：每500ms拉低一次，共3次；期间收到数据视为成功，否则判定失败
 static void sensor_wakeup_sequence(void)
 {
-    // 使能 UART1 与 433 接收，允许处理传感器回传数据
     xEventGroupSetBits(xEventFlags, UART1_ENABLE_BIT | RF_ENABLE_BIT);
-    // 清除上一轮数据就绪标记与唤醒接收标志
     uart1_chip_id[0] = '\0';
     rf_chip_id[0] = '\0';
     xEventGroupClearBits(xEventFlags, UART1_DATA_READY | RF_DATA_READY);
     wake_recv_flag = 0;
-
-    // 确保唤醒引脚初始为高电平（待机），并清一次历史残留
     wakeup_gpio_set_level(1);
     vTaskDelay(pdMS_TO_TICKS(10));
     uart_flush_input(UART1_PORT);
@@ -337,20 +333,12 @@ static void sensor_wakeup_sequence(void)
 
     for (int i = 0; i < WAKEUP_ATTEMPTS; i++)
     {
-        // 拉低唤醒引脚，触发传感器发送一帧数据
         wakeup_gpio_set_level(0);
         printf(">>> 唤醒第%d次：拉低唤醒引脚\n", i + 1);
         vTaskDelay(pdMS_TO_TICKS(WAKEUP_LOW_PULSE_MS));
-
-        // 拉低期间产生的全是残破字节，清掉（此时 RX 中断仍被 disable，不会丢真数据）
         uart_flush_input(UART1_PORT);
         xQueueReset(uart1_queue);
-
-        // 释放：恢复 UART RX，开始监听
         wakeup_gpio_set_level(1);
-
-        // 监听窗口内等待传感器响应。窗口内不要再 flush / reset 队列，
-        // 否则"DUT 已被唤醒、但上电/采样几百 ms 后才回传"的那一帧会被当垃圾冲掉。
         for (int left = WAKEUP_LISTEN_MS; left > 0 && !wake_recv_flag; left -= 50)
         {
             vTaskDelay(pdMS_TO_TICKS(50));
@@ -363,7 +351,6 @@ static void sensor_wakeup_sequence(void)
         }
     }
 
-    // 所有拉低尝试在各自监听窗口内均未收到数据，判定失败
     wakeup_gpio_set_level(1);
     printf(">>> WAKEUP_FAIL：%d次唤醒、每次监听%ums内均未收到数据\n",
            WAKEUP_ATTEMPTS, WAKEUP_LISTEN_MS);
