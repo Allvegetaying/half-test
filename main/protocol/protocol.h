@@ -14,13 +14,13 @@
 
 #define PROTO_FRAME_MAX      200     /* 单帧最长（含 $ 与 #） */
 #define PROTO_MODEL_MAX       32
-#define PROTO_CHIP_ID_MAX     8      /* CHIP_ID 固定 4 字节（8 位 hex） */
+#define PROTO_CHIP_ID_MAX     12     /* CHIP_ID = vendor + sensor type + 4-byte sensor id */
 #define PROTO_TOKEN_MAX       16     /* 一帧最多字段数 */
 
 /* SEMI_TEST 解析结果 */
 typedef struct {
     char  model[PROTO_MODEL_MAX];
-    char  chip_id[PROTO_CHIP_ID_MAX + 1];   /* 4 字节 ID（8 位 hex）+ '\0' */
+    char  chip_id[PROTO_CHIP_ID_MAX + 1];   /* 12 hex chars plus '\0' */
     float press;   /* kPa */
     float temp;    /* ℃   */
     float acc_z;   /* g   */
@@ -43,6 +43,10 @@ int proto_crc_check(const char *line, uint16_t *calc_out);
 /* 解析 SEMI_TEST 业务字段；返回 0=成功，-1=失败（含非 SEMI_TEST 帧） */
 int proto_parse_semi(const char *line, proto_semi_t *out);
 int proto_build_semi_result(char *out, size_t out_size, const char *chip_id, uint8_t result);
+int proto_chip_id_equal(const char *left, const char *right);
+int proto_build_rf_chip_id(char *out, size_t out_size,
+                           uint8_t vendor_type, uint8_t sensor_type,
+                           uint32_t sensor_id);
 
 /* 喂入原始字节流，切出 "$...#" 完整帧并逐帧回调；返回本批切出的帧数 */
 int proto_rx_feed(proto_rx_t *rx, const uint8_t *data, int len,

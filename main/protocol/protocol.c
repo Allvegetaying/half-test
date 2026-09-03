@@ -1,6 +1,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <inttypes.h>
 #include "protocol.h"
 #include "blt_gpio.h"   /* 现成 CRC16() 校验函数，原样使用（含于 INCLUDE_DIRS "A7169"） */
 
@@ -73,6 +74,45 @@ static int chip_id_is_valid(const char *s)
             return 0;
     }
     return (i == PROTO_CHIP_ID_MAX);
+}
+
+static char hex_upper(char c)
+{
+    if (c >= 'a' && c <= 'f')
+        return (char)(c - 'a' + 'A');
+    return c;
+}
+
+int proto_chip_id_equal(const char *left, const char *right)
+{
+    if (!left || !right)
+        return 0;
+
+    for (int i = 0; i < PROTO_CHIP_ID_MAX; i++) {
+        if (left[i] == '\0' || right[i] == '\0')
+            return 0;
+        if (hex_upper(left[i]) != hex_upper(right[i]))
+            return 0;
+    }
+
+    return left[PROTO_CHIP_ID_MAX] == '\0' && right[PROTO_CHIP_ID_MAX] == '\0';
+}
+
+int proto_build_rf_chip_id(char *out, size_t out_size,
+                           uint8_t vendor_type, uint8_t sensor_type,
+                           uint32_t sensor_id)
+{
+    int len;
+
+    if (!out || out_size == 0)
+        return -1;
+
+    len = snprintf(out, out_size, "%02X%02X%08" PRIX32,
+                   vendor_type, sensor_type, sensor_id);
+    if (len < 0 || len >= (int)out_size)
+        return -1;
+
+    return len;
 }
 
 int proto_parse_semi(const char *line, proto_semi_t *out)

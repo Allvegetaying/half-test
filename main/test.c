@@ -19,8 +19,8 @@
 #include "A7169/A7169.h"
 #include "protocol.h"
 
-// GPIO2 引脚定义
-#define WAKEUP_GPIO_NUM      GPIO_NUM_2
+// 传感器唤醒脚与传感器 TX 共线，工装侧共用 UART1 RX(GPIO18)
+#define WAKEUP_GPIO_NUM      GPIO_NUM_18
 #define CONTROL_GPIO_NUM1    GPIO_NUM_5
 #define CONTROL_GPIO_NUM2    GPIO_NUM_6
 
@@ -51,9 +51,8 @@ static EventGroupHandle_t xEventFlags;
 #define RF_DATA_READY      (1 << 3)   // 433 数据就绪
 
 // 数据对比缓冲区
-#define RF_ID_HEX_LEN 8
 static char uart1_chip_id[PROTO_CHIP_ID_MAX + 1];
-static char rf_chip_id[RF_ID_HEX_LEN + 1];
+static char rf_chip_id[PROTO_CHIP_ID_MAX + 1];
 
 // 函数声明
 static uint8_t control_gpio_read_level(uint8_t gpio_num);
@@ -62,11 +61,11 @@ uint8_t state=0;
 
 void GPIO_INIT()
 {
-    // 配置唤醒引脚为输出模式
+    // 唤醒/传感器TX共线脚默认释放，UART1_INIT 后切到 UART RX 接收
     gpio_config_t io_conf = {
         .pin_bit_mask = (1ULL << WAKEUP_GPIO_NUM),
-        .mode = GPIO_MODE_OUTPUT,
-        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .mode = GPIO_MODE_OUTPUT_OD,
+        .pull_up_en = GPIO_PULLUP_ENABLE,
         .pull_down_en = GPIO_PULLDOWN_DISABLE,
         .intr_type = GPIO_INTR_DISABLE
     };
@@ -142,31 +141,6 @@ static void uart0_send_string(const char* str)
     uart_write_bytes(UART0_PORT, str, strlen(str));
 }
 
-static char hex_upper(char c)
-{
-    if (c >= 'a' && c <= 'f')
-        return (char)(c - 'a' + 'A');
-    return c;
-}
-
-static int id_matches_rf_id(const char *uart_id, const char *rf_id)
-{
-    size_t uart_len = strlen(uart_id);
-    const char *uart_cmp = uart_id;
-
-    if (uart_len > RF_ID_HEX_LEN)
-        uart_cmp = uart_id + uart_len - RF_ID_HEX_LEN;
-    else if (uart_len != RF_ID_HEX_LEN)
-        return 0;
-
-    for (int i = 0; i < RF_ID_HEX_LEN; i++) {
-        if (hex_upper(uart_cmp[i]) != hex_upper(rf_id[i]))
-            return 0;
-    }
-
-    return 1;
-}
-
 // 数据对比与结果上报
 static void compare_and_report(void)
 {
@@ -174,7 +148,7 @@ static void compare_and_report(void)
     if (!(bits & UART1_DATA_READY) || !(bits & RF_DATA_READY))
         return;
 
-    uint8_t result = id_matches_rf_id(uart1_chip_id, rf_chip_id) ? 0 : 1;
+    uint8_t result = proto_chip_id_equal(uart1_chip_id, rf_chip_id) ? 0 : 1;
     char frame[96];
 
     if (proto_build_semi_result(frame, sizeof(frame), uart1_chip_id, result) > 0)
@@ -217,20 +191,49 @@ static void button_reset_task(void *pvParameters)
                 vTaskDelay(pdMS_TO_TICKS(50));
             }
         }
-
         vTaskDelay(pdMS_TO_TICKS(50));
     }
 }
 
-//唤醒引脚控制
+static void uart1_restore_rx_pin(void)
+{
+    uart_set_pin(UART1_PORT, UART1_TX_PIN, UART1_RX_PIN,
+                 UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
+}
+
+//唤醒/传感器TX共线脚控制：拉低时切 GPIO 开漏输出，释放时恢复 UART RX
 static void wakeup_gpio_set_level(uint32_t level)
 {
-    gpio_set_level(WAKEUP_GPIO_NUM, level);
+    if (level == 0)
+    {
+        gpio_config_t io_conf = {
+            .pin_bit_mask = (1ULL << WAKEUP_GPIO_NUM),
+            .mode = GPIO_MODE_OUTPUT_OD,
+            .pull_up_en = GPIO_PULLUP_ENABLE,
+            .pull_down_en = GPIO_PULLDOWN_DISABLE,
+            .intr_type = GPIO_INTR_DISABLE
+        };
+        gpio_config(&io_conf);
+        gpio_set_level(WAKEUP_GPIO_NUM, 0);
+        return;
+    }
+
+    gpio_set_level(WAKEUP_GPIO_NUM, 1);
+    uart1_restore_rx_pin();
 }
 
 // 定义状态
 #define PIN_ACTIVE   1   // 激活状态
 #define PIN_STANDBY  0   // 待机状态
+
+// 唤醒序列参数
+#define WAKEUP_ATTEMPTS      3    // 唤醒拉低次数
+#define WAKEUP_INTERVAL_MS   500  // 每次拉低间隔(ms)
+#define WAKEUP_LOW_PULSE_MS  20   // 单次拉低脉冲宽度(ms)
+
+// 唤醒次数内传感器是否已回传数据
+// 独立于 UART1_DATA_READY，避免被 compare_and_report 提前清除
+static volatile uint8_t wake_recv_flag = 0;
 
 #define DETECT_GPIO_NUM    GPIO_NUM_4
 
@@ -296,24 +299,64 @@ static void pin_detect_task(void *pvParameters)
     }
 }
 
+// 传感器唤醒序列：每500ms拉低一次，共3次；期间收到数据视为成功，否则判定失败
+static void sensor_wakeup_sequence(void)
+{
+    // 使能 UART1 与 433 接收，允许处理传感器回传数据
+    xEventGroupSetBits(xEventFlags, UART1_ENABLE_BIT | RF_ENABLE_BIT);
+    // 清除上一轮数据就绪标记与唤醒接收标志
+    uart1_chip_id[0] = '\0';
+    rf_chip_id[0] = '\0';
+    xEventGroupClearBits(xEventFlags, UART1_DATA_READY | RF_DATA_READY);
+    wake_recv_flag = 0;
+
+    // 确保唤醒引脚初始为高电平（待机）
+    wakeup_gpio_set_level(1);
+    vTaskDelay(pdMS_TO_TICKS(10));
+
+    for (int i = 0; i < WAKEUP_ATTEMPTS; i++)
+    {
+        // 拉低唤醒引脚，触发传感器发送一帧数据
+        wakeup_gpio_set_level(0);
+        printf(">>> 唤醒第%d次：拉低唤醒引脚\n", i + 1);
+        vTaskDelay(pdMS_TO_TICKS(WAKEUP_LOW_PULSE_MS));
+        wakeup_gpio_set_level(1);
+
+        // 等待传感器响应（500ms 间隔）
+        vTaskDelay(pdMS_TO_TICKS(WAKEUP_INTERVAL_MS - WAKEUP_LOW_PULSE_MS));
+
+        if (wake_recv_flag)
+        {
+            printf(">>> 唤醒第%d次收到数据，判定成功\n", i + 1);
+            return;
+        }
+    }
+
+    // 三次拉低均未收到数据，判定失败
+    wakeup_gpio_set_level(1);
+    printf(">>> WAKEUP_FAIL：三次唤醒均未收到数据，判定失败\n");
+    uart0_send_string("WAKEUP_FAIL: 三次唤醒未收到数据\r\n");
+    xEventGroupClearBits(xEventFlags, UART1_ENABLE_BIT | RF_ENABLE_BIT);
+}
+
 static void worker_up_task(void *pvParameters)
 {
     uint32_t state = PIN_STANDBY;
     printf("工作任务启动，等待通知...\n");
-    while (1) 
+    while (1)
     {
         // 等待任务通知
-        if (xTaskNotifyWait(0, 0, &state, portMAX_DELAY) == pdTRUE) 
+        if (xTaskNotifyWait(0, 0, &state, portMAX_DELAY) == pdTRUE)
         {
-            if (state == PIN_ACTIVE) {
+            if (state == PIN_ACTIVE)
+            {
                 printf(">>> 收到激活通知，开始工作！\n");
-                wakeup_gpio_set_level(1);  // 设置唤醒引脚为高电平
-                xEventGroupSetBits(xEventFlags, UART1_ENABLE_BIT | RF_ENABLE_BIT);  // 使能 UART1 和 433接收模式
-                
-            } else 
+                sensor_wakeup_sequence();  // 执行唤醒序列（拉低3次，未收到数据则判定失败）
+            }
+            else
             {
                 printf(">>> 收到待机通知，进入待机状态\n");
-                wakeup_gpio_set_level(0);  // 设置唤醒引脚为低电平
+                wakeup_gpio_set_level(1);  // 设置唤醒引脚为高电平
                 xEventGroupClearBits(xEventFlags, UART1_ENABLE_BIT | RF_ENABLE_BIT);  // 失能 UART1 和 433接收模式
             }
         }
@@ -377,6 +420,7 @@ static void on_uart1_frame(const char *line, void *ctx)
     strncpy(uart1_chip_id, st.chip_id, sizeof(uart1_chip_id) - 1);
     uart1_chip_id[sizeof(uart1_chip_id) - 1] = '\0';
     xEventGroupSetBits(xEventFlags, UART1_DATA_READY);
+    wake_recv_flag = 1;   // 标记唤醒序列已收到数据
     compare_and_report();
 }
 
@@ -472,9 +516,11 @@ static void rf_recv_task(void *pvParameters)
                 rf_normal_data_t rf_data;
                 if (A7169_ParseNormalData(rf_buf, len, &rf_data))
                 {
-                    printf("433 normal data: ID=%08" PRIX32
+                    printf("433 normal data: ID=%02X%02X%08" PRIX32
                            " ACC=%.1fg TEMP=%dC PRESS=%.1fkPa "
                            "vendor=0x%02X type=0x%02X status=0x%02X\n",
+                           rf_data.vendor_type,
+                           rf_data.sensor_type,
                            rf_data.sensor_id,
                            rf_data.acceleration_g,
                            rf_data.temperature_c,
@@ -483,12 +529,27 @@ static void rf_recv_task(void *pvParameters)
                            rf_data.sensor_type,
                            rf_data.status);
 
-                    snprintf(rf_chip_id, sizeof(rf_chip_id), "%08" PRIX32, rf_data.sensor_id);
-                    xEventGroupSetBits(xEventFlags, RF_DATA_READY);
-                    compare_and_report();
+                    if (proto_build_rf_chip_id(rf_chip_id, sizeof(rf_chip_id),
+                                               rf_data.vendor_type,
+                                               rf_data.sensor_type,
+                                               rf_data.sensor_id) > 0)
+                    {
+                        xEventGroupSetBits(xEventFlags, RF_DATA_READY);
+                        compare_and_report();
+                    }
                 }
             }
         }
+    }
+}
+// ADC采集任务
+static void adc_read_task(void *pvParameters)
+{
+    (void)pvParameters;
+
+    while (1)
+    {
+        vTaskDelay(pdMS_TO_TICKS(1000));
     }
 }
 void app_main(void)
@@ -512,7 +573,8 @@ void app_main(void)
     xTaskCreate(button_reset_task, "button_reset", 2048, NULL, 5, NULL);
     // 设置唤醒引脚为高电平，通知进入工作状态
     // xEventGroupSetBits(xEventFlags, RF_ENABLE_BIT);
-
+    //创建ADC采集任务
+    xTaskCreate(adc_read_task, "adc_read", 2048, NULL, 4, NULL);
 
     while (1)
     {
