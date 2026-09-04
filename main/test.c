@@ -42,6 +42,8 @@
 // Battery voltage = ADC pin voltage * NUM / DEN. Change this for the board divider.
 #define BATTERY_DIVIDER_NUM           1
 #define BATTERY_DIVIDER_DEN           1
+#define BATTERY_ADC_REF_MV            3300
+#define BATTERY_ADC_MAX_RAW           4095
 
 // UART0 引脚定义
 #define UART0_TX_PIN    43
@@ -702,12 +704,14 @@ static esp_err_t battery_adc_read(int *raw_avg, int *battery_mv)
 
     *raw_avg = raw_sum / BATTERY_ADC_SAMPLE_COUNT;
 
-    int adc_mv = *raw_avg;
+    int adc_mv = 0;
     if (battery_adc_cali_enabled) {
         esp_err_t ret = adc_cali_raw_to_voltage(battery_adc_cali_handle, *raw_avg, &adc_mv);
         if (ret != ESP_OK) {
             return ret;
         }
+    } else {
+        adc_mv = (*raw_avg * BATTERY_ADC_REF_MV) / BATTERY_ADC_MAX_RAW;
     }
 
     *battery_mv = (adc_mv * BATTERY_DIVIDER_NUM) / BATTERY_DIVIDER_DEN;
