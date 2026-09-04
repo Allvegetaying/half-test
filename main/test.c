@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <stdbool.h>
 #include <inttypes.h>
+#include <stdint.h>
 #include "sdkconfig.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -78,6 +79,7 @@ static char rf_chip_id[PROTO_CHIP_ID_MAX + 1];
 static proto_rx_t uart1_rx;
 static SemaphoreHandle_t uart1_rx_mutex;
 static volatile uint8_t wakeup_break_expected = 0;
+static volatile uint8_t wake_recv_flag = 0;
 static adc_oneshot_unit_handle_t battery_adc_handle = NULL;
 static adc_cali_handle_t battery_adc_cali_handle = NULL;
 static bool battery_adc_cali_enabled = false;
@@ -166,9 +168,6 @@ void UART0_INIT(void)
            UART0_TX_PIN, UART0_RX_PIN, UART0_BAUD_RATE);
 }
 
-// UART1发送字符串
-// UART1接收数据
-
 // UART0发送字符串
 static void uart0_send_string(const char* str)
 {
@@ -193,7 +192,9 @@ static void compare_and_report(void)
 
     uart1_chip_id[0] = '\0';
     rf_chip_id[0] = '\0';
-    xEventGroupClearBits(xEventFlags, UART1_DATA_READY | RF_DATA_READY);
+    xEventGroupClearBits(xEventFlags,
+                         UART1_DATA_READY | RF_DATA_READY |
+                         UART1_ENABLE_BIT | RF_ENABLE_BIT);
 }
 
 // 重置对比状态，准备下一轮检测
@@ -201,7 +202,10 @@ static void reset_compare_state(void)
 {
     uart1_chip_id[0] = '\0';
     rf_chip_id[0] = '\0';
-    xEventGroupClearBits(xEventFlags, UART1_DATA_READY | RF_DATA_READY);
+    wake_recv_flag = 0;
+    xEventGroupClearBits(xEventFlags,
+                         UART1_DATA_READY | RF_DATA_READY |
+                         UART1_ENABLE_BIT | RF_ENABLE_BIT);
     uart0_send_string("RESET: 已重置，等待下一轮检测\r\n");
 }
 
@@ -273,8 +277,6 @@ static void wakeup_gpio_set_level(uint32_t level)
 
 // 唤醒次数内传感器是否已回传数据
 // 独立于 UART1_DATA_READY，避免被 compare_and_report 提前清除
-static volatile uint8_t wake_recv_flag = 0;
-
 #define DETECT_GPIO_NUM    GPIO_NUM_4
 
 // A7169 GIO1 中断引脚定义 (GPIO10)
@@ -341,16 +343,18 @@ static void pin_detect_task(void *pvParameters)
 // 传感器唤醒序列：每500ms拉低一次，共3次；期间收到数据视为成功，否则判定失败
 static void sensor_wakeup_sequence(void)
 {
-    xEventGroupSetBits(xEventFlags, UART1_ENABLE_BIT | RF_ENABLE_BIT);
     uart1_chip_id[0] = '\0';
     rf_chip_id[0] = '\0';
-    xEventGroupClearBits(xEventFlags, UART1_DATA_READY | RF_DATA_READY);
+    xEventGroupClearBits(xEventFlags,
+                         UART1_DATA_READY | RF_DATA_READY |
+                         UART1_ENABLE_BIT | RF_ENABLE_BIT);
     wake_recv_flag = 0;
     wakeup_gpio_set_level(1);
     vTaskDelay(pdMS_TO_TICKS(10));
     uart_flush_input(UART1_PORT);
     xQueueReset(uart1_queue);
     uart1_rx_reset();
+    xEventGroupSetBits(xEventFlags, UART1_ENABLE_BIT | RF_ENABLE_BIT);
 
     for (int i = 0; i < WAKEUP_ATTEMPTS; i++)
     {
@@ -439,6 +443,10 @@ static void GPIO10_IRQ_INIT(void)
 static void on_uart1_frame(const char *line, void *ctx)
 {
     (void)ctx;
+    EventBits_t bits = xEventGroupGetBits(xEventFlags);
+    if (!(bits & UART1_ENABLE_BIT) || (bits & UART1_DATA_READY))
+        return;
+
     uint16_t calc = 0;
     if (proto_crc_check(line, &calc) != 0)
     {
@@ -525,6 +533,41 @@ static int uart1_poll_buffered_data(const char *source)
 }
 
 //传感器数据接收函数
+static void uart1_discard_event_data(const uart_event_t *event, uint8_t *data, size_t data_size)
+{
+    if (!event || !data || data_size == 0)
+        return;
+
+    if (event->type == UART_DATA)
+    {
+        size_t remaining = event->size;
+        while (remaining > 0)
+        {
+            size_t chunk = remaining;
+            if (chunk > data_size)
+                chunk = data_size;
+
+            int len = uart_read_bytes(UART1_PORT, data, chunk, 0);
+            if (len <= 0)
+                break;
+
+            remaining -= (size_t)len;
+        }
+        uart1_rx_reset();
+        return;
+    }
+
+    if (event->type == UART_FIFO_OVF ||
+        event->type == UART_BUFFER_FULL ||
+        event->type == UART_BREAK)
+    {
+        wakeup_break_expected = 0;
+        uart_flush_input(UART1_PORT);
+        xQueueReset(uart1_queue);
+        uart1_rx_reset();
+    }
+}
+
 static void uart1_event_task(void *pvParameters)
 {
     uart_event_t event;
@@ -535,8 +578,12 @@ static void uart1_event_task(void *pvParameters)
         if (xQueueReceive(uart1_queue, &event, portMAX_DELAY)) 
         {
             // 未使能时丢弃数据，不处理
-            if (!(xEventGroupGetBits(xEventFlags) & UART1_ENABLE_BIT)) continue;
             memset(data, 0, sizeof(data));
+            if (!(xEventGroupGetBits(xEventFlags) & UART1_ENABLE_BIT))
+            {
+                uart1_discard_event_data(&event, data, sizeof(data));
+                continue;
+            }
             switch (event.type) 
             {
                 case UART_DATA:  // 收到数据
@@ -600,6 +647,7 @@ static void rf_recv_task(void *pvParameters)
     while (1) {
         if (!(xEventGroupGetBits(xEventFlags) & RF_ENABLE_BIT))
         {
+            xTaskNotifyWait(0, UINT32_MAX, &notify_value, 0);
             vTaskDelay(pdMS_TO_TICKS(50));
             continue;
         }
@@ -611,6 +659,8 @@ static void rf_recv_task(void *pvParameters)
             uint8_t len = A7169_GetData(rf_buf, RF_NORMAL_FRAME_LEN - 1);
             if (len > 0)
             {
+                if (xEventGroupGetBits(xEventFlags) & RF_DATA_READY)
+                    continue;
 
                 rf_normal_data_t rf_data;
                 if (A7169_ParseNormalData(rf_buf, len, &rf_data))
