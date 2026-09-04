@@ -16,5 +16,5 @@
     "board/esp32s3-builtin.cfg"
   ],
   "idf.flashType": "UART",
-  "idf.portWin": "COM33"
+  "idf.portWin": "COM30"
 }

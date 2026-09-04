@@ -10,6 +10,8 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/event_groups.h"
+#include "freertos/semphr.h"
+#include "esp_err.h"
 #include "esp_chip_info.h"
 #include "esp_flash.h"
 #include "esp_system.h"
@@ -55,9 +57,16 @@ static EventGroupHandle_t xEventFlags;
 // 数据对比缓冲区
 static char uart1_chip_id[PROTO_CHIP_ID_MAX + 1];
 static char rf_chip_id[PROTO_CHIP_ID_MAX + 1];
+static proto_rx_t uart1_rx;
+static SemaphoreHandle_t uart1_rx_mutex;
+static volatile uint8_t wakeup_break_expected = 0;
 
 // 函数声明
 static uint8_t control_gpio_read_level(uint8_t gpio_num);
+static void on_uart1_frame(const char *line, void *ctx);
+static void uart1_rx_reset(void);
+static void uart1_process_rx_bytes(const uint8_t *data, int len, const char *source);
+static int uart1_poll_buffered_data(const char *source);
 
 uint8_t state=0;
 
@@ -222,6 +231,7 @@ static void wakeup_gpio_set_level(uint32_t level)
 {
     if (level == 0)
     {
+        wakeup_break_expected = 1;
         uart_disable_rx_intr(UART1_PORT);
         gpio_config_t io_conf = {
             .pin_bit_mask = (1ULL << WAKEUP_GPIO_NUM),
@@ -235,7 +245,7 @@ static void wakeup_gpio_set_level(uint32_t level)
         return;
     }
 
-    // gpio_set_level(WAKEUP_GPIO_NUM, 1);
+    gpio_set_level(WAKEUP_GPIO_NUM, 1);
     uart1_restore_rx_pin();
     uart_enable_rx_intr(UART1_PORT);
 }
@@ -330,6 +340,7 @@ static void sensor_wakeup_sequence(void)
     vTaskDelay(pdMS_TO_TICKS(10));
     uart_flush_input(UART1_PORT);
     xQueueReset(uart1_queue);
+    uart1_rx_reset();
 
     for (int i = 0; i < WAKEUP_ATTEMPTS; i++)
     {
@@ -338,9 +349,11 @@ static void sensor_wakeup_sequence(void)
         vTaskDelay(pdMS_TO_TICKS(WAKEUP_LOW_PULSE_MS));
         uart_flush_input(UART1_PORT);
         xQueueReset(uart1_queue);
+        uart1_rx_reset();
         wakeup_gpio_set_level(1);
         for (int left = WAKEUP_LISTEN_MS; left > 0 && !wake_recv_flag; left -= 50)
         {
+            uart1_poll_buffered_data("轮询");
             vTaskDelay(pdMS_TO_TICKS(50));
         }
 
@@ -442,12 +455,77 @@ static void on_uart1_frame(const char *line, void *ctx)
     compare_and_report();
 }
 
+static void uart1_rx_reset(void)
+{
+    if (uart1_rx_mutex && xSemaphoreTake(uart1_rx_mutex, pdMS_TO_TICKS(50)) == pdTRUE)
+    {
+        uart1_rx.len = 0;
+        uart1_rx.buf[0] = '\0';
+        xSemaphoreGive(uart1_rx_mutex);
+        return;
+    }
+
+    uart1_rx.len = 0;
+    uart1_rx.buf[0] = '\0';
+}
+
+static void uart1_process_rx_bytes(const uint8_t *data, int len, const char *source)
+{
+    if (!data || len <= 0)
+        return;
+
+    printf("UART1 %s收到 %d 字节: ", source ? source : "", len);
+    for (int i = 0; i < len; i++) {
+        printf("[%d]=%d(0x%02X) ", i, data[i], data[i]);
+    }
+    printf("\n");
+
+    if (uart1_rx_mutex)
+        xSemaphoreTake(uart1_rx_mutex, portMAX_DELAY);
+
+    proto_rx_feed(&uart1_rx, data, len, on_uart1_frame, NULL);
+
+    if (uart1_rx_mutex)
+        xSemaphoreGive(uart1_rx_mutex);
+}
+
+static int uart1_poll_buffered_data(const char *source)
+{
+    uint8_t data[BUF_SIZE];
+    size_t buffered = 0;
+    int total = 0;
+
+    if (uart_get_buffered_data_len(UART1_PORT, &buffered) != ESP_OK || buffered == 0)
+        return 0;
+
+    printf("UART1 %s缓冲区已有 %u 字节\n", source ? source : "", (unsigned)buffered);
+
+    while (buffered > 0)
+    {
+        size_t want = buffered;
+        if (want >= BUF_SIZE)
+            want = BUF_SIZE - 1;
+
+        int len = uart_read_bytes(UART1_PORT, data, want, 0);
+        if (len <= 0)
+            break;
+
+        uart1_process_rx_bytes(data, len, source);
+        total += len;
+
+        if ((size_t)len >= buffered)
+            break;
+        buffered -= (size_t)len;
+    }
+
+    return total;
+}
+
 //传感器数据接收函数
 static void uart1_event_task(void *pvParameters)
 {
     uart_event_t event;
     uint8_t data[BUF_SIZE];
-    static proto_rx_t uart1_rx;   // 串口协议分帧器
     while (1) 
     {
         // 等待UART事件
@@ -461,28 +539,21 @@ static void uart1_event_task(void *pvParameters)
                 case UART_DATA:  // 收到数据
                     // 读取数据
                     if (event.size >= BUF_SIZE) event.size = BUF_SIZE - 1;
-                    uart_read_bytes(UART1_PORT, data, event.size, pdMS_TO_TICKS(100));
-                    data[event.size] = '\0';
-
-                    printf("收到 %d 字节: ", event.size);
-                    for (int i = 0; i < event.size; i++) {
-                        printf("[%d]=%d(0x%02X) ", i, data[i], data[i]);
-                    }
-                    printf("\n");
-
-                    // 送入协议分帧器；每收到完整 "$...#" 帧回调 on_uart1_frame()
-                    proto_rx_feed(&uart1_rx, data, event.size, on_uart1_frame, NULL);
+                    int len = uart_read_bytes(UART1_PORT, data, event.size, pdMS_TO_TICKS(100));
+                    uart1_process_rx_bytes(data, len, "事件");
                     break;
                 case UART_FIFO_OVF:  // FIFO溢出
                     printf("UART1 FIFO 溢出\n");
                     uart_flush_input(UART1_PORT);
                     xQueueReset(uart1_queue);
+                    uart1_rx_reset();
                     break;
 
                 case UART_BUFFER_FULL:  // 缓冲区满
                     printf("UART1 缓冲区满\n");
                     uart_flush_input(UART1_PORT);
                     xQueueReset(uart1_queue);
+                    uart1_rx_reset();
                     break;
 
                 case UART_PARITY_ERR:  // 校验错误
@@ -494,9 +565,18 @@ static void uart1_event_task(void *pvParameters)
                     break;
 
                 case UART_BREAK:
-                    printf("UART1 BREAK 事件，清理唤醒低电平产生的串口状态\n");
-                    uart_flush_input(UART1_PORT);
-                    xQueueReset(uart1_queue);
+                    if (wakeup_break_expected)
+                    {
+                        wakeup_break_expected = 0;
+                        printf("UART1 BREAK 事件来自本轮唤醒低电平，保留后续接收队列\n");
+                    }
+                    else
+                    {
+                        printf("UART1 BREAK 事件，清理异常低电平产生的串口状态\n");
+                        uart_flush_input(UART1_PORT);
+                        xQueueReset(uart1_queue);
+                        uart1_rx_reset();
+                    }
                     break;
 
                 default:
@@ -584,6 +664,7 @@ void app_main(void)
 
     // 创建事件标志组 存放各种状态标志位
     xEventFlags = xEventGroupCreate();
+    uart1_rx_mutex = xSemaphoreCreateMutex();
     if (InitRF() == 0)
     {
         printf("433 RF 初始化成功\n");
