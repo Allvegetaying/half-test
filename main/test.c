@@ -308,10 +308,13 @@ static void pin_detect_task(void *pvParameters)
     // 读取初始电平
     uint8_t initLevel = gpio_get_level(DETECT_GPIO_NUM);
     lastState = initLevel;
-    if (initLevel == 0) {
+    if (initLevel == 0) 
+    {
         printf("初始状态：GPIO%d=0 -> 通知激活\n", DETECT_GPIO_NUM);
         xTaskNotify(xWorkerTaskHandle, PIN_ACTIVE, eSetValueWithOverwrite);
-    } else {
+    } 
+    else 
+    {
         printf("初始状态：GPIO%d=1 -> 通知待机\n", DETECT_GPIO_NUM);
         xTaskNotify(xWorkerTaskHandle, PIN_STANDBY, eSetValueWithOverwrite);
     }
