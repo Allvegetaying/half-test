@@ -5,6 +5,7 @@
  */
 
 #include <stdio.h>
+#include <stdbool.h>
 #include <inttypes.h>
 #include "sdkconfig.h"
 #include "freertos/FreeRTOS.h"
@@ -17,6 +18,9 @@
 #include "esp_system.h"
 #include "driver/gpio.h"
 #include "driver/uart.h"
+#include "esp_adc/adc_oneshot.h"
+#include "esp_adc/adc_cali.h"
+#include "esp_adc/adc_cali_scheme.h"
 #include "string.h"
 #include "A7169/A7169.h"
 #include "protocol.h"
@@ -26,7 +30,18 @@
 #define WAKEUP_GPIO_NUM       SENSOR_WAKE_UART_GPIO
 #define CONTROL_GPIO_NUM1    GPIO_NUM_5
 #define CONTROL_GPIO_NUM2    GPIO_NUM_6
-#define CONTROL_GPIO_NUM3    GPIO_NUM_40
+
+#define BATTERY_ADC_GPIO              GPIO_NUM_1
+#define BATTERY_ADC_UNIT              ADC_UNIT_1
+#define BATTERY_ADC_CHANNEL           ADC_CHANNEL_0
+#define BATTERY_ADC_ATTEN             ADC_ATTEN_DB_12
+#define BATTERY_ADC_BITWIDTH          ADC_BITWIDTH_DEFAULT
+#define BATTERY_ADC_SAMPLE_COUNT      16
+#define BATTERY_ADC_SAMPLE_PERIOD_MS  1000
+
+// Battery voltage = ADC pin voltage * NUM / DEN. Change this for the board divider.
+#define BATTERY_DIVIDER_NUM           1
+#define BATTERY_DIVIDER_DEN           1
 
 // UART0 引脚定义
 #define UART0_TX_PIN    43
@@ -60,6 +75,9 @@ static char rf_chip_id[PROTO_CHIP_ID_MAX + 1];
 static proto_rx_t uart1_rx;
 static SemaphoreHandle_t uart1_rx_mutex;
 static volatile uint8_t wakeup_break_expected = 0;
+static adc_oneshot_unit_handle_t battery_adc_handle = NULL;
+static adc_cali_handle_t battery_adc_cali_handle = NULL;
+static bool battery_adc_cali_enabled = false;
 
 // 函数声明
 static uint8_t control_gpio_read_level(uint8_t gpio_num);
@@ -67,6 +85,8 @@ static void on_uart1_frame(const char *line, void *ctx);
 static void uart1_rx_reset(void);
 static void uart1_process_rx_bytes(const uint8_t *data, int len, const char *source);
 static int uart1_poll_buffered_data(const char *source);
+static esp_err_t battery_adc_init(void);
+static esp_err_t battery_adc_read(int *raw_avg, int *battery_mv);
 
 uint8_t state=0;
 
@@ -92,17 +112,6 @@ void GPIO_INIT()
     };
     gpio_config(&io_conf2);
 
-    //初始化GPIO40
-    gpio_config_t io_conf3 = {
-        .pin_bit_mask = (1ULL << GPIO_NUM_40),
-        .mode = GPIO_MODE_OUTPUT,
-        .pull_up_en = GPIO_PULLUP_ENABLE,
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type = GPIO_INTR_DISABLE
-    };
-    gpio_config(&io_conf3);
-
-    gpio_set_level(GPIO_NUM_40, 1);  // 默认高电平，释放传感器 TX 共线脚
 
 }
 
@@ -147,17 +156,7 @@ void UART0_INIT(void)
 }
 
 // UART1发送字符串
-static void uart1_send_string(const char* str)
-{
-    uart_write_bytes(UART1_PORT, str, strlen(str));
-}
-
 // UART1接收数据
-static int uart1_receive_data(uint8_t* data, size_t max_len)
-{
-    int len = uart_read_bytes(UART1_PORT, data, max_len, pdMS_TO_TICKS(100));
-    return len;
-}
 
 // UART0发送字符串
 static void uart0_send_string(const char* str)
@@ -345,7 +344,6 @@ static void sensor_wakeup_sequence(void)
     for (int i = 0; i < WAKEUP_ATTEMPTS; i++)
     {
         wakeup_gpio_set_level(0);
-        printf(">>> 唤醒第%d次：拉低唤醒引脚\n", i + 1);
         vTaskDelay(pdMS_TO_TICKS(WAKEUP_LOW_PULSE_MS));
         uart_flush_input(UART1_PORT);
         xQueueReset(uart1_queue);
@@ -471,14 +469,10 @@ static void uart1_rx_reset(void)
 
 static void uart1_process_rx_bytes(const uint8_t *data, int len, const char *source)
 {
+    (void)source;
+
     if (!data || len <= 0)
         return;
-
-    printf("UART1 %s收到 %d 字节: ", source ? source : "", len);
-    for (int i = 0; i < len; i++) {
-        printf("[%d]=%d(0x%02X) ", i, data[i], data[i]);
-    }
-    printf("\n");
 
     if (uart1_rx_mutex)
         xSemaphoreTake(uart1_rx_mutex, portMAX_DELAY);
@@ -497,8 +491,6 @@ static int uart1_poll_buffered_data(const char *source)
 
     if (uart_get_buffered_data_len(UART1_PORT, &buffered) != ESP_OK || buffered == 0)
         return 0;
-
-    printf("UART1 %s缓冲区已有 %u 字节\n", source ? source : "", (unsigned)buffered);
 
     while (buffered > 0)
     {
@@ -568,11 +560,9 @@ static void uart1_event_task(void *pvParameters)
                     if (wakeup_break_expected)
                     {
                         wakeup_break_expected = 0;
-                        printf("UART1 BREAK 事件来自本轮唤醒低电平，保留后续接收队列\n");
                     }
                     else
                     {
-                        printf("UART1 BREAK 事件，清理异常低电平产生的串口状态\n");
                         uart_flush_input(UART1_PORT);
                         xQueueReset(uart1_queue);
                         uart1_rx_reset();
@@ -610,12 +600,6 @@ static void rf_recv_task(void *pvParameters)
             uint8_t len = A7169_GetData(rf_buf, RF_NORMAL_FRAME_LEN - 1);
             if (len > 0)
             {
-                printf("433 收到 %d 字节: ", len);
-                for (int i = 0; i < len; i++)
-                {
-                    printf("0x%02X ", rf_buf[i]);
-                }
-                printf("\n");
 
                 rf_normal_data_t rf_data;
                 if (A7169_ParseNormalData(rf_buf, len, &rf_data))
@@ -647,13 +631,112 @@ static void rf_recv_task(void *pvParameters)
     }
 }
 // ADC采集任务
+static esp_err_t battery_adc_init(void)
+{
+    adc_unit_t unit = ADC_UNIT_1;
+    adc_channel_t channel = ADC_CHANNEL_0;
+    esp_err_t ret = adc_oneshot_io_to_channel(BATTERY_ADC_GPIO, &unit, &channel);
+    if (ret != ESP_OK) {
+        return ret;
+    }
+
+    if (unit != BATTERY_ADC_UNIT || channel != BATTERY_ADC_CHANNEL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    adc_oneshot_unit_init_cfg_t init_config = {
+        .unit_id = BATTERY_ADC_UNIT,
+        .clk_src = ADC_RTC_CLK_SRC_DEFAULT,
+        .ulp_mode = ADC_ULP_MODE_DISABLE,
+    };
+
+    ret = adc_oneshot_new_unit(&init_config, &battery_adc_handle);
+    if (ret != ESP_OK) {
+        return ret;
+    }
+
+    adc_oneshot_chan_cfg_t channel_config = {
+        .atten = BATTERY_ADC_ATTEN,
+        .bitwidth = BATTERY_ADC_BITWIDTH,
+    };
+
+    ret = adc_oneshot_config_channel(battery_adc_handle, BATTERY_ADC_CHANNEL, &channel_config);
+    if (ret != ESP_OK) {
+        adc_oneshot_del_unit(battery_adc_handle);
+        battery_adc_handle = NULL;
+        return ret;
+    }
+
+#if ADC_CALI_SCHEME_CURVE_FITTING_SUPPORTED
+    adc_cali_curve_fitting_config_t cali_config = {
+        .unit_id = BATTERY_ADC_UNIT,
+        .chan = BATTERY_ADC_CHANNEL,
+        .atten = BATTERY_ADC_ATTEN,
+        .bitwidth = BATTERY_ADC_BITWIDTH,
+    };
+
+    ret = adc_cali_create_scheme_curve_fitting(&cali_config, &battery_adc_cali_handle);
+    if (ret == ESP_OK) {
+        battery_adc_cali_enabled = true;
+    }
+#endif
+
+    return ESP_OK;
+}
+
+static esp_err_t battery_adc_read(int *raw_avg, int *battery_mv)
+{
+    if (!battery_adc_handle || !raw_avg || !battery_mv) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    int raw_sum = 0;
+    for (int i = 0; i < BATTERY_ADC_SAMPLE_COUNT; i++) {
+        int raw = 0;
+        esp_err_t ret = adc_oneshot_read(battery_adc_handle, BATTERY_ADC_CHANNEL, &raw);
+        if (ret != ESP_OK) {
+            return ret;
+        }
+        raw_sum += raw;
+    }
+
+    *raw_avg = raw_sum / BATTERY_ADC_SAMPLE_COUNT;
+
+    int adc_mv = *raw_avg;
+    if (battery_adc_cali_enabled) {
+        esp_err_t ret = adc_cali_raw_to_voltage(battery_adc_cali_handle, *raw_avg, &adc_mv);
+        if (ret != ESP_OK) {
+            return ret;
+        }
+    }
+
+    *battery_mv = (adc_mv * BATTERY_DIVIDER_NUM) / BATTERY_DIVIDER_DEN;
+    return ESP_OK;
+}
+
 static void adc_read_task(void *pvParameters)
 {
     (void)pvParameters;
 
+    esp_err_t ret = battery_adc_init();
+    if (ret != ESP_OK) {
+        printf("Battery ADC init failed: %s\n", esp_err_to_name(ret));
+        vTaskDelete(NULL);
+        return;
+    }
+
+    printf("Battery ADC ready: GPIO%d ADC%d_CH%d\n",
+           BATTERY_ADC_GPIO, BATTERY_ADC_UNIT + 1, BATTERY_ADC_CHANNEL);
+
     while (1)
     {
-        vTaskDelay(pdMS_TO_TICKS(1000));
+        int raw = 0;
+        int battery_mv = 0;
+        ret = battery_adc_read(&raw, &battery_mv);
+        if (ret == ESP_OK) {
+            printf("BAT=%d.%03dV raw=%d\n", battery_mv / 1000, battery_mv % 1000, raw);
+        }
+        vTaskDelay(pdMS_TO_TICKS(BATTERY_ADC_SAMPLE_PERIOD_MS));
     }
 }
 void app_main(void)
