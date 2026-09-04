@@ -30,6 +30,7 @@
 #define WAKEUP_GPIO_NUM       SENSOR_WAKE_UART_GPIO
 #define CONTROL_GPIO_NUM1    GPIO_NUM_5
 #define CONTROL_GPIO_NUM2    GPIO_NUM_6
+#define GPIO40_FLOAT_INPUT   GPIO_NUM_40
 
 #define BATTERY_ADC_GPIO              GPIO_NUM_1
 #define BATTERY_ADC_UNIT              ADC_UNIT_1
@@ -114,6 +115,14 @@ void GPIO_INIT()
     };
     gpio_config(&io_conf2);
 
+    gpio_config_t io_conf3 = {
+        .pin_bit_mask = (1ULL << GPIO40_FLOAT_INPUT),
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE
+    };
+    gpio_config(&io_conf3);
 
 }
 
