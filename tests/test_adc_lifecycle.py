@@ -6,8 +6,12 @@ SOURCE = Path(__file__).resolve().parents[1] / "main" / "test.c"
 
 
 def _function_body(source: str, name: str) -> str:
-    start = source.index(f"static void {name}(")
-    brace = source.index("{", start)
+    match = re.search(rf"static\s+\w+\s+{name}\s*\([^;{{}}]*\)\s*\{{", source)
+    if not match:
+        raise AssertionError(f"Could not find function {name}")
+
+    start = match.start()
+    brace = source.index("{", match.start())
     depth = 0
 
     for index in range(brace, len(source)):
@@ -69,6 +73,12 @@ def test_product_detection_uses_gpio41_and_gpio42_as_lifecycle_inputs() -> None:
     assert "GPIO%d/GPIO%d 同时为低 -> 通知激活" in detect_body
     assert "GPIO%d/GPIO%d 同时为高 -> 通知待机" in detect_body
     assert "DETECT_GPIO_NUM" not in detect_body
+
+    worker_body = _function_body(source, "worker_up_task")
+    assert "uart1_chip_id[0] = '\\0'" in worker_body
+    assert "rf_chip_id[0] = '\\0'" in worker_body
+    assert "wake_recv_flag = 0" in worker_body
+    assert any("UART1_DATA_READY" in call and "RF_DATA_READY" in call for call in _clear_calls(worker_body))
 
 
 if __name__ == "__main__":
