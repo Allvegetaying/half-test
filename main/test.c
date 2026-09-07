@@ -212,29 +212,6 @@ static void reset_compare_state(void)
     uart0_send_string("RESET: 已重置，等待下一轮检测\r\n");
 }
 
-// 按键重置任务 
-static void button_reset_task(void *pvParameters)
-{
-    printf("按键重置任务启动 (GPIO%d, GPIO%d)\n", CONTROL_GPIO_NUM1, CONTROL_GPIO_NUM2);
-
-    while (1) 
-    {
-        uint8_t level1 = control_gpio_read_level(CONTROL_GPIO_NUM1);
-        uint8_t level2 = control_gpio_read_level(CONTROL_GPIO_NUM2);
-
-        // 任一按键按下（低电平）触发重置
-        if (level1 == 0 && level2 == 0) 
-        {
-            reset_compare_state();
-            // 等待按键释放，避免重复触发
-            while (control_gpio_read_level(CONTROL_GPIO_NUM1) == 0 || control_gpio_read_level(CONTROL_GPIO_NUM2) == 0) 
-            {
-                vTaskDelay(pdMS_TO_TICKS(50));
-            }
-        }
-        vTaskDelay(pdMS_TO_TICKS(50));
-    }
-}
 
 static void uart1_restore_rx_pin(void)
 {
@@ -280,7 +257,6 @@ static void wakeup_gpio_set_level(uint32_t level)
 
 // 唤醒次数内传感器是否已回传数据
 
-#define DETECT_GPIO_NUM    GPIO_NUM_4
 
 // A7169 GIO1 中断引脚定义 (GPIO10)
 #define A7169_GIO1_IRQ_PIN  GPIO_NUM_10
@@ -290,59 +266,56 @@ static TaskHandle_t xDetectTaskHandle = NULL;
 static TaskHandle_t xWorkerTaskHandle = NULL;
 static TaskHandle_t xRfRecvTaskHandle = NULL;  // 433 RF接收任务句柄
 
-// 引脚检测任务
+// GPIO41+GPIO42 双引脚检测任务：同时低电平启动，同时高电平等待下一轮
+#define START_GPIO1   CONTROL_GPIO_NUM1   // GPIO41
+#define START_GPIO2   CONTROL_GPIO_NUM2   // GPIO42
+
 static void pin_detect_task(void *pvParameters)
 {
-    uint8_t lastState = PIN_STANDBY;
+    printf("双引脚检测任务启动 (GPIO%d + GPIO%d)\n", START_GPIO1, START_GPIO2);
+    printf("规则：两引脚同时为低 -> 启动采集；同时为高 -> 等待下一轮\n");
 
-    // 配置 GPIO5 为输入模式
-    gpio_config_t io_conf = 
+    uint8_t last_state = PIN_STANDBY;
+
+    // 读取初始状态
+    uint8_t lv1 = control_gpio_read_level(START_GPIO1);
+    uint8_t lv2 = control_gpio_read_level(START_GPIO2);
+    if (lv1 == 0 && lv2 == 0)
     {
-        .pin_bit_mask = (1ULL << DETECT_GPIO_NUM),
-        .mode = GPIO_MODE_INPUT,
-        .pull_up_en = GPIO_PULLUP_DISABLE,
-        .pull_down_en = GPIO_PULLDOWN_ENABLE,
-        .intr_type = GPIO_INTR_DISABLE
-    };
-    gpio_config(&io_conf);
-
-    printf("引脚检测任务启动 (GPIO%d)\n", DETECT_GPIO_NUM);
-
-    // 读取初始电平
-    uint8_t initLevel = gpio_get_level(DETECT_GPIO_NUM);
-    lastState = initLevel;
-    if (initLevel == 0) 
-    {
-        printf("初始状态：GPIO%d=0 -> 通知激活\n", DETECT_GPIO_NUM);
+        printf("初始状态：GPIO%d=0 GPIO%d=0 -> 通知激活\n", START_GPIO1, START_GPIO2);
+        last_state = PIN_ACTIVE;
         xTaskNotify(xWorkerTaskHandle, PIN_ACTIVE, eSetValueWithOverwrite);
-    } 
-    else 
+    }
+    else
     {
-        printf("初始状态：GPIO%d=1 -> 通知待机\n", DETECT_GPIO_NUM);
+        printf("初始状态：GPIO%d=%d GPIO%d=%d -> 通知待机\n", START_GPIO1, lv1, START_GPIO2, lv2);
+        last_state = PIN_STANDBY;
         xTaskNotify(xWorkerTaskHandle, PIN_STANDBY, eSetValueWithOverwrite);
     }
 
     while (1)
     {
-        // 读取引脚电平
-        uint8_t currentState = gpio_get_level(DETECT_GPIO_NUM);
-        // 状态变化时才通知
-        if (currentState != lastState)
+        lv1 = control_gpio_read_level(START_GPIO1);
+        lv2 = control_gpio_read_level(START_GPIO2);
+
+        if (lv1 == 0 && lv2 == 0 && last_state != PIN_ACTIVE)
         {
-            if (currentState == 0)
-            {
-                printf("GPIO%d 变0 -> 通知激活\n", DETECT_GPIO_NUM);
-                // 发送激活通知
-                xTaskNotify(xWorkerTaskHandle, PIN_ACTIVE, eSetValueWithOverwrite);
-            } 
-            else
-            {
-                printf("GPIO%d 变1 -> 通知待机\n", DETECT_GPIO_NUM);
-                xTaskNotify(xWorkerTaskHandle, PIN_STANDBY, eSetValueWithOverwrite);
-            }
-            lastState = currentState;
+            // 两引脚同时低电平 -> 激活
+            printf("GPIO%d=0 GPIO%d=0 -> 通知激活\n", START_GPIO1, START_GPIO2);
+            last_state = PIN_ACTIVE;
+            xTaskNotify(xWorkerTaskHandle, PIN_ACTIVE, eSetValueWithOverwrite);
         }
-        vTaskDelay(pdMS_TO_TICKS(50));  // 50ms 检测一次
+        else if (lv1 == 1 && lv2 == 1 && last_state != PIN_STANDBY)
+        {
+            // 两引脚同时高电平 -> 待机，准备下一轮
+            printf("GPIO%d=1 GPIO%d=1 -> 通知待机（等待下一轮）\n", START_GPIO1, START_GPIO2);
+            last_state = PIN_STANDBY;
+            reset_compare_state();
+            xTaskNotify(xWorkerTaskHandle, PIN_STANDBY, eSetValueWithOverwrite);
+        }
+        // 其他情况（一个高一个低）保持当前状态不变
+
+        vTaskDelay(pdMS_TO_TICKS(50));
     }
 }
 
@@ -648,17 +621,35 @@ static void rf_recv_task(void *pvParameters)
 {
     uint8_t rf_buf[64];
     uint32_t notify_value;
+    bool rf_enabled_prev = false;
 
     printf("433 RF 接收任务启动 (中断模式)\n");
 
-    while (1) 
+    while (1)
     {
-        if (!(xEventGroupGetBits(xEventFlags) & RF_ENABLE_BIT))
+        bool rf_enabled = (xEventGroupGetBits(xEventFlags) & RF_ENABLE_BIT) != 0;
+
+        if (!rf_enabled)
         {
+            // 未使能：天线仍在收帧，A7169 收到帧会把 GIO1 拉低并一直锁存。
+            // 若不清走，下次使能后 GIO1 无法产生下降沿，中断接收会失效，故静默排空复位。
+            if (GIO1S == 0)
+                A7169_RxFifoReset();
+
+            // 丢弃 RF 关闭期间残留的中断通知，避免使能后读到陈旧数据
             xTaskNotifyWait(0, UINT32_MAX, &notify_value, 0);
+            rf_enabled_prev = false;
             vTaskDelay(pdMS_TO_TICKS(50));
             continue;
         }
+
+        // 由关到开的瞬间：先排空残留帧、复位 GIO1，保证后续真帧能触发下降沿中断
+        if (!rf_enabled_prev)
+        {
+            A7169_RxFifoReset();
+            printf(">>> RF 已使能，接收通路已复位，等待433数据中断...\n");
+        }
+        rf_enabled_prev = true;
 
         // 等待 GPIO10 中断通知 (超时 100ms)
         if (xTaskNotifyWait(0, 0, &notify_value, pdMS_TO_TICKS(100)) == pdTRUE)
@@ -835,7 +826,6 @@ void app_main(void)
     xTaskCreate(uart1_event_task, "uart1_event", 4096, NULL, 8, NULL);
     xTaskCreate(worker_up_task, "worker_up", 2048, NULL, 6, &xWorkerTaskHandle);
     xTaskCreate(pin_detect_task, "pin_detect", 2048, NULL, 7, &xDetectTaskHandle);
-    xTaskCreate(button_reset_task, "button_reset", 2048, NULL, 5, NULL);
     // 设置唤醒引脚为高电平，通知进入工作状态
     // xEventGroupSetBits(xEventFlags, RF_ENABLE_BIT);
     //创建ADC采集任务

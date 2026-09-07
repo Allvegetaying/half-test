@@ -59,6 +59,7 @@ void entry_deep_sleep_mode(void);
 void wake_up_from_deep_sleep_mode(void);
 uint8_t A7169_ParseNormalData(const uint8_t *data, uint8_t len, rf_normal_data_t *out);
 uint8_t A7169_GetData(uint8_t *buf,int len);
+void A7169_RxFifoReset(void);
 void RxPacket(void);
 uint8_t InitRF(void);
 uint8_t A7169_POR();

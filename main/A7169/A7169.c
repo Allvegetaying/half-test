@@ -1658,6 +1658,22 @@ uint8_t A7169_GetData(uint8_t *buf, int len)
     return res;
 }
 
+// 排空并复位 A7169 接收通路：
+// 复位 RX FIFO 指针、读走残余字节后重新进入 RX 模式。
+// 用途：RF 长时间未使能时，天线仍在收帧，帧会让 GIO1(有效帧指示)锁存拉低；
+//       若不排空，重新使能后 GIO1 无法产生下降沿，中断接收将失效。
+// 本函数不做解析、不打印，仅作状态复位。
+void A7169_RxFifoReset(void)
+{
+    A7169_StrobeCmd(CMD_RFR);          //RX FIFO address pointer reset
+    A7169_CS_L();
+    A7169_WriteByte(CMD_FIFO_R);       //RX FIFO read command
+    A7169_InMode();
+    for(int i = 0; i < RF_NORMAL_FRAME_LEN * 2; i++)
+        A7169_ReadByte();              //读走残余字节
+    A7169_CS_H();
+    A7169_StrobeCmd(CMD_RX);           //重新进入 RX 模式
+}
 
 uint8_t A7169_GetData_test(uint8_t *buf, int len)
 {
