@@ -29,8 +29,8 @@
 // 传感器唤醒脚与传感器 TX 共线，工装侧共用 UART1 RX
 #define SENSOR_WAKE_UART_GPIO GPIO_NUM_39
 #define WAKEUP_GPIO_NUM       SENSOR_WAKE_UART_GPIO
-#define CONTROL_GPIO_NUM1    GPIO_NUM_5
-#define CONTROL_GPIO_NUM2    GPIO_NUM_6
+#define CONTROL_GPIO_NUM1    GPIO_NUM_41
+#define CONTROL_GPIO_NUM2    GPIO_NUM_42
 #define GPIO40_FLOAT_INPUT   GPIO_NUM_40
 
 #define BATTERY_ADC_GPIO              GPIO_NUM_1
@@ -72,6 +72,7 @@ static EventGroupHandle_t xEventFlags;
 #define RF_ENABLE_BIT      (1 << 1)   // 433 RF 使能位
 #define UART1_DATA_READY   (1 << 2)   // UART1 数据就绪
 #define RF_DATA_READY      (1 << 3)   // 433 数据就绪
+#define ADC_ENABLE_BIT     (1 << 4)   // ADC 采样使能位
 
 // 数据对比缓冲区
 static char uart1_chip_id[PROTO_CHIP_ID_MAX + 1];
@@ -194,7 +195,8 @@ static void compare_and_report(void)
     rf_chip_id[0] = '\0';
     xEventGroupClearBits(xEventFlags,
                          UART1_DATA_READY | RF_DATA_READY |
-                         UART1_ENABLE_BIT | RF_ENABLE_BIT);
+                         UART1_ENABLE_BIT | RF_ENABLE_BIT |
+                         ADC_ENABLE_BIT);
 }
 
 // 重置对比状态，准备下一轮检测
@@ -205,7 +207,8 @@ static void reset_compare_state(void)
     wake_recv_flag = 0;
     xEventGroupClearBits(xEventFlags,
                          UART1_DATA_READY | RF_DATA_READY |
-                         UART1_ENABLE_BIT | RF_ENABLE_BIT);
+                         UART1_ENABLE_BIT | RF_ENABLE_BIT |
+                         ADC_ENABLE_BIT);
     uart0_send_string("RESET: 已重置，等待下一轮检测\r\n");
 }
 
@@ -220,7 +223,7 @@ static void button_reset_task(void *pvParameters)
         uint8_t level2 = control_gpio_read_level(CONTROL_GPIO_NUM2);
 
         // 任一按键按下（低电平）触发重置
-        if (level1 == 0 || level2 == 0) 
+        if (level1 == 0 && level2 == 0) 
         {
             reset_compare_state();
             // 等待按键释放，避免重复触发
@@ -276,7 +279,7 @@ static void wakeup_gpio_set_level(uint32_t level)
                                      // 窗口太短时，迟到的响应会在下一轮唤醒的清队列操作里被冲掉。
 
 // 唤醒次数内传感器是否已回传数据
-// 独立于 UART1_DATA_READY，避免被 compare_and_report 提前清除
+
 #define DETECT_GPIO_NUM    GPIO_NUM_4
 
 // A7169 GIO1 中断引脚定义 (GPIO10)
@@ -350,14 +353,15 @@ static void sensor_wakeup_sequence(void)
     rf_chip_id[0] = '\0';
     xEventGroupClearBits(xEventFlags,
                          UART1_DATA_READY | RF_DATA_READY |
-                         UART1_ENABLE_BIT | RF_ENABLE_BIT);
+                         UART1_ENABLE_BIT | RF_ENABLE_BIT |
+                         ADC_ENABLE_BIT);
     wake_recv_flag = 0;
     wakeup_gpio_set_level(1);
     vTaskDelay(pdMS_TO_TICKS(10));
     uart_flush_input(UART1_PORT);
     xQueueReset(uart1_queue);
     uart1_rx_reset();
-    xEventGroupSetBits(xEventFlags, UART1_ENABLE_BIT | RF_ENABLE_BIT);
+    xEventGroupSetBits(xEventFlags, UART1_ENABLE_BIT | RF_ENABLE_BIT | ADC_ENABLE_BIT);
 
     for (int i = 0; i < WAKEUP_ATTEMPTS; i++)
     {
@@ -384,7 +388,7 @@ static void sensor_wakeup_sequence(void)
     printf(">>> WAKEUP_FAIL：%d次唤醒、每次监听%ums内均未收到数据\n",
            WAKEUP_ATTEMPTS, WAKEUP_LISTEN_MS);
     uart0_send_string("WAKEUP_FAIL\r\n");
-    xEventGroupClearBits(xEventFlags, UART1_ENABLE_BIT | RF_ENABLE_BIT);
+    xEventGroupClearBits(xEventFlags, UART1_ENABLE_BIT | RF_ENABLE_BIT | ADC_ENABLE_BIT);
 }
 static void worker_up_task(void *pvParameters)
 {
@@ -404,7 +408,7 @@ static void worker_up_task(void *pvParameters)
             {
                 printf(">>> 收到待机通知，进入待机状态\n");
                 wakeup_gpio_set_level(1);  // 设置唤醒引脚为高电平
-                xEventGroupClearBits(xEventFlags, UART1_ENABLE_BIT | RF_ENABLE_BIT);  // 失能 UART1 和 433接收模式
+                xEventGroupClearBits(xEventFlags, UART1_ENABLE_BIT | RF_ENABLE_BIT | ADC_ENABLE_BIT);  // 失能 UART1 和 433接收模式
             }
         }
     }
@@ -647,7 +651,8 @@ static void rf_recv_task(void *pvParameters)
 
     printf("433 RF 接收任务启动 (中断模式)\n");
 
-    while (1) {
+    while (1) 
+    {
         if (!(xEventGroupGetBits(xEventFlags) & RF_ENABLE_BIT))
         {
             xTaskNotifyWait(0, UINT32_MAX, &notify_value, 0);
@@ -767,7 +772,8 @@ static esp_err_t battery_adc_read(int *raw_avg, int *battery_mv)
     *raw_avg = raw_sum / BATTERY_ADC_SAMPLE_COUNT;
 
     int adc_mv = 0;
-    if (battery_adc_cali_enabled) {
+    if (battery_adc_cali_enabled) 
+    {
         esp_err_t ret = adc_cali_raw_to_voltage(battery_adc_cali_handle, *raw_avg, &adc_mv);
         if (ret != ESP_OK) {
             return ret;
@@ -796,10 +802,13 @@ static void adc_read_task(void *pvParameters)
 
     while (1)
     {
+        xEventGroupWaitBits(xEventFlags, ADC_ENABLE_BIT, pdFALSE, pdTRUE, portMAX_DELAY);
+
         int raw = 0;
         int battery_mv = 0;
         ret = battery_adc_read(&raw, &battery_mv);
-        if (ret == ESP_OK) {
+        if (ret == ESP_OK && (xEventGroupGetBits(xEventFlags) & ADC_ENABLE_BIT))
+        {
             printf("BAT=%d.%03dV raw=%d\n", battery_mv / 1000, battery_mv % 1000, raw);
         }
         vTaskDelay(pdMS_TO_TICKS(BATTERY_ADC_SAMPLE_PERIOD_MS));
