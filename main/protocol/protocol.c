@@ -134,21 +134,24 @@ int proto_parse_semi(const char *line, proto_semi_t *out)
     return 0;
 }
 
-int proto_build_semi_result(char *out, size_t out_size, const char *chip_id, uint8_t result)
+/* ---------------------------------------------------------------------
+ * SEMI_RESULT 上报帧构建（工装 → 上位机）：
+ * 参照 SEMI_TEST 的传感器输出，在 CHIP_ID 前附加判定 RESULT(0 成功 / 1 失败)。
+ * ------------------------------------------------------------------- */
+int proto_build_semi_result(char *out, size_t out_size, uint8_t result,
+                            const proto_semi_t *semi)
 {
     char body[PROTO_FRAME_MAX + 1];
-    char safe_chip_id[PROTO_CHIP_ID_MAX + 1];
     int body_len;
     int frame_len;
 
-    if (!out || !chip_id || out_size == 0)
+    if (!out || !semi || out_size == 0)
         return -1;
 
-    strncpy(safe_chip_id, chip_id, sizeof(safe_chip_id) - 1);
-    safe_chip_id[sizeof(safe_chip_id) - 1] = '\0';
-
-    body_len = snprintf(body, sizeof(body), "TPMS_S01,SEMI_RESULT,%s,%u",
-                        safe_chip_id, result ? 1 : 0);
+    body_len = snprintf(body, sizeof(body),
+                        "TPMS_S01,SEMI_RESULT,%u,%s,%.1f,%.1f,%.2f,%.2f",
+                        result ? 1u : 0u, semi->chip_id, semi->press, semi->temp,
+                        semi->acc_z, semi->bat_v);
     if (body_len < 0 || body_len >= (int)sizeof(body))
         return -1;
 

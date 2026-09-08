@@ -23,6 +23,7 @@
 #include "esp_adc/adc_cali.h"
 #include "esp_adc/adc_cali_scheme.h"
 #include "string.h"
+#include <stdlib.h>
 #include "A7169/A7169.h"
 #include "protocol.h"
 
@@ -38,14 +39,31 @@
 #define BATTERY_ADC_CHANNEL           ADC_CHANNEL_0
 #define BATTERY_ADC_ATTEN             ADC_ATTEN_DB_12
 #define BATTERY_ADC_BITWIDTH          ADC_BITWIDTH_DEFAULT
-#define BATTERY_ADC_SAMPLE_COUNT      16
+#define BATTERY_ADC_SAMPLE_COUNT      32      /* 每轮采样数（排序去毛刺后取中段均值） */
+#define BATTERY_ADC_TRIMMED           6       /* 去掉最大/最小各 N 个毛刺样本再求均值 */
 #define BATTERY_ADC_SAMPLE_PERIOD_MS  1000
 
-// Battery voltage = ADC pin voltage * NUM / DEN. Change this for the board divider.
-#define BATTERY_DIVIDER_NUM           1
+// Battery voltage = ADC pin voltage * NUM / DEN.
+// 板载 1/2 电阻分压（Vpin = Vbat/2，如 10k 对 10k），电池电压 = 引脚电压 * 2/1。
+// 名义电池 3.0~3.6V 折到引脚 1.5~1.8V，正好落在 S3 ADC(12dB) 的良好线性区间内。
+#define BATTERY_DIVIDER_NUM           2
 #define BATTERY_DIVIDER_DEN           1
-#define BATTERY_ADC_REF_MV            3300
+
+// 仅当 esp_adc eFuse 标定不可用时的线性回退满量程电压。S3 ADC 在 12dB 衰减下
+// 输入量程约 0~3.1V，回退按 3300 满量程会把读数整体算低，故用 3100。
+#define BATTERY_ADC_REF_MV            3100
 #define BATTERY_ADC_MAX_RAW           4095
+
+/* 可选：最终结果域两点线性校正（默认关闭，-1 即不启用）。
+ * 目的：做到“接入已知电压 V → 上报 V”。给分压输入端加两档电压，串口日志里
+ * 记下当前上报值（BAT=xxx），用万用表记下真实值，分别填到下面两组宏：
+ *   加入 2.000V 上报 1.978，加入 3.300V 上报 3.312 时：
+ *     LO_REPORT=1978 LO_TRUE=2000   HI_REPORT=3312 HI_TRUE=3300
+ * 四点齐全即按 v_true = k*v_report + b 线性修正。 */
+#define BATTERY_CALI_LO_REPORT_MV     (-1)
+#define BATTERY_CALI_LO_TRUE_MV       (-1)
+#define BATTERY_CALI_HI_REPORT_MV     (-1)
+#define BATTERY_CALI_HI_TRUE_MV       (-1)
 
 // UART0 引脚定义
 #define UART0_TX_PIN    43
@@ -76,6 +94,7 @@ static EventGroupHandle_t xEventFlags;
 
 // 数据对比缓冲区
 static char uart1_chip_id[PROTO_CHIP_ID_MAX + 1];
+static proto_semi_t uart1_semi;
 static char rf_chip_id[PROTO_CHIP_ID_MAX + 1];
 static proto_rx_t uart1_rx;
 static SemaphoreHandle_t uart1_rx_mutex;
@@ -84,6 +103,8 @@ static volatile uint8_t wake_recv_flag = 0;
 static adc_oneshot_unit_handle_t battery_adc_handle = NULL;
 static adc_cali_handle_t battery_adc_cali_handle = NULL;
 static bool battery_adc_cali_enabled = false;
+/* 最近一次成功的 ADC 实测电池电压(mV)，-1 表示当前检测轮尚未采到有效值 */
+static volatile int battery_adc_last_mv = -1;
 
 // 函数声明
 static uint8_t control_gpio_read_level(uint8_t gpio_num);
@@ -183,15 +204,26 @@ static void compare_and_report(void)
         return;
 
     uint8_t result = proto_chip_id_equal(uart1_chip_id, rf_chip_id) ? 0 : 1;
-    char frame[96];
+    char frame[PROTO_FRAME_MAX + 1];
 
-    if (proto_build_semi_result(frame, sizeof(frame), uart1_chip_id, result) > 0)
+    /* 上报帧的 BAT_V 用工装 ADC 实测电压替换传感器自报值（本检测轮已采到才用） */
+    proto_semi_t semi = uart1_semi;
+    int adc_mv = battery_adc_last_mv;
+    if (adc_mv >= 0)
+        semi.bat_v = (float)adc_mv / 1000.0f;
+
+    if (proto_build_semi_result(frame, sizeof(frame), result, &semi) > 0)
         uart0_send_string(frame);
 
-    printf("SEMI_RESULT UART_ID=%s RF_ID=%s RESULT=%u\n",
+    printf("SEMI_RESULT UART_ID=%s RF_ID=%s RESULT=%u",
            uart1_chip_id, rf_chip_id, result);
+    if (adc_mv >= 0)
+        printf(" BAT_ADC=%d.%03dV\n", adc_mv / 1000, adc_mv % 1000);
+    else
+        printf(" BAT_SENSOR=%.2fV(无ADC采样，沿用传感器上报)\n", uart1_semi.bat_v);
 
     uart1_chip_id[0] = '\0';
+    memset(&uart1_semi, 0, sizeof(uart1_semi));
     rf_chip_id[0] = '\0';
     xEventGroupClearBits(xEventFlags,
                          UART1_DATA_READY | RF_DATA_READY |
@@ -203,6 +235,7 @@ static void compare_and_report(void)
 static void reset_compare_state(void)
 {
     uart1_chip_id[0] = '\0';
+    memset(&uart1_semi, 0, sizeof(uart1_semi));
     rf_chip_id[0] = '\0';
     wake_recv_flag = 0;
     xEventGroupClearBits(xEventFlags,
@@ -323,12 +356,14 @@ static void pin_detect_task(void *pvParameters)
 static void sensor_wakeup_sequence(void)
 {
     uart1_chip_id[0] = '\0';
+    memset(&uart1_semi, 0, sizeof(uart1_semi));
     rf_chip_id[0] = '\0';
     xEventGroupClearBits(xEventFlags,
                          UART1_DATA_READY | RF_DATA_READY |
                          UART1_ENABLE_BIT | RF_ENABLE_BIT |
                          ADC_ENABLE_BIT);
     wake_recv_flag = 0;
+    battery_adc_last_mv = -1;   /* 新一轮开始，旧轮 ADC 值作废 */
     wakeup_gpio_set_level(1);
     vTaskDelay(pdMS_TO_TICKS(10));
     uart_flush_input(UART1_PORT);
@@ -447,6 +482,7 @@ static void on_uart1_frame(const char *line, void *ctx)
     // 原始帧存入对比缓冲区
     strncpy(uart1_chip_id, st.chip_id, sizeof(uart1_chip_id) - 1);
     uart1_chip_id[sizeof(uart1_chip_id) - 1] = '\0';
+    uart1_semi = st;
     xEventGroupSetBits(xEventFlags, UART1_DATA_READY);
     wake_recv_flag = 1;   // 标记唤醒序列已收到数据
     compare_and_report();
@@ -744,27 +780,58 @@ static esp_err_t battery_adc_init(void)
     return ESP_OK;
 }
 
+static int cmp_int(const void *a, const void *b)
+{
+    return *(const int *)a - *(const int *)b;
+}
+
+/* 结果域线性校正：v_true = k*v_report + b，k/b 由两组标定点拟合。
+ * 未配置标定宏（默认 -1）时恒等返回。 */
+static int battery_apply_linear_calib(int mv)
+{
+#if (BATTERY_CALI_LO_REPORT_MV >= 0) && (BATTERY_CALI_LO_TRUE_MV >= 0) && \
+    (BATTERY_CALI_HI_REPORT_MV >= 0) && (BATTERY_CALI_HI_TRUE_MV >= 0) && \
+    (BATTERY_CALI_HI_REPORT_MV > BATTERY_CALI_LO_REPORT_MV)
+    const float slope = ((float)(BATTERY_CALI_HI_TRUE_MV - BATTERY_CALI_LO_TRUE_MV)) /
+                        ((float)(BATTERY_CALI_HI_REPORT_MV - BATTERY_CALI_LO_REPORT_MV));
+    const float offset = (float)BATTERY_CALI_LO_TRUE_MV -
+                         slope * (float)BATTERY_CALI_LO_REPORT_MV;
+    return (int)(slope * (float)mv + offset);
+#else
+    return mv;
+#endif
+}
+
 static esp_err_t battery_adc_read(int *raw_avg, int *battery_mv)
 {
     if (!battery_adc_handle || !raw_avg || !battery_mv) {
         return ESP_ERR_INVALID_ARG;
     }
 
-    int raw_sum = 0;
+    int samples[BATTERY_ADC_SAMPLE_COUNT];
     for (int i = 0; i < BATTERY_ADC_SAMPLE_COUNT; i++) {
         int raw = 0;
         esp_err_t ret = adc_oneshot_read(battery_adc_handle, BATTERY_ADC_CHANNEL, &raw);
         if (ret != ESP_OK) {
             return ret;
         }
-        raw_sum += raw;
+        samples[i] = raw;
     }
 
-    *raw_avg = raw_sum / BATTERY_ADC_SAMPLE_COUNT;
+    /* 升序排序，掐头去尾剔除单个毛刺/偶发跳变样本，对中间段求均值 */
+    qsort(samples, BATTERY_ADC_SAMPLE_COUNT, sizeof(int), cmp_int);
+    int lo = BATTERY_ADC_TRIMMED;
+    int hi = BATTERY_ADC_SAMPLE_COUNT - BATTERY_ADC_TRIMMED;
+    if (hi <= lo) { lo = 0; hi = BATTERY_ADC_SAMPLE_COUNT; }
+
+    int sum = 0;
+    for (int i = lo; i < hi; i++) {
+        sum += samples[i];
+    }
+    *raw_avg = sum / (hi - lo);
 
     int adc_mv = 0;
-    if (battery_adc_cali_enabled) 
-    {
+    if (battery_adc_cali_enabled) {
         esp_err_t ret = adc_cali_raw_to_voltage(battery_adc_cali_handle, *raw_avg, &adc_mv);
         if (ret != ESP_OK) {
             return ret;
@@ -773,7 +840,9 @@ static esp_err_t battery_adc_read(int *raw_avg, int *battery_mv)
         adc_mv = (*raw_avg * BATTERY_ADC_REF_MV) / BATTERY_ADC_MAX_RAW;
     }
 
-    *battery_mv = (adc_mv * BATTERY_DIVIDER_NUM) / BATTERY_DIVIDER_DEN;
+    /* 先按分压比换算回电池电压，再做可选的两点线性校正 */
+    int bat_mv = (adc_mv * BATTERY_DIVIDER_NUM) / BATTERY_DIVIDER_DEN;
+    *battery_mv = battery_apply_linear_calib(bat_mv);
     return ESP_OK;
 }
 
@@ -788,8 +857,14 @@ static void adc_read_task(void *pvParameters)
         return;
     }
 
-    printf("Battery ADC ready: GPIO%d ADC%d_CH%d\n",
-           BATTERY_ADC_GPIO, BATTERY_ADC_UNIT + 1, BATTERY_ADC_CHANNEL);
+    if (battery_adc_cali_enabled) {
+        printf("Battery ADC ready: GPIO%d ADC%d_CH%d (eFuse curve-fitting 标定启用)\n",
+               BATTERY_ADC_GPIO, BATTERY_ADC_UNIT + 1, BATTERY_ADC_CHANNEL);
+    } else {
+        printf("Battery ADC ready: GPIO%d ADC%d_CH%d (无 eFuse 标定，采用 %d mV 满量程线性回退，精度有限)\n",
+               BATTERY_ADC_GPIO, BATTERY_ADC_UNIT + 1, BATTERY_ADC_CHANNEL,
+               BATTERY_ADC_REF_MV);
+    }
 
     while (1)
     {
@@ -800,6 +875,7 @@ static void adc_read_task(void *pvParameters)
         ret = battery_adc_read(&raw, &battery_mv);
         if (ret == ESP_OK && (xEventGroupGetBits(xEventFlags) & ADC_ENABLE_BIT))
         {
+            battery_adc_last_mv = battery_mv;
             printf("BAT=%d.%03dV raw=%d\n", battery_mv / 1000, battery_mv % 1000, raw);
         }
         vTaskDelay(pdMS_TO_TICKS(BATTERY_ADC_SAMPLE_PERIOD_MS));

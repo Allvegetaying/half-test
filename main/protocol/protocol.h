@@ -5,9 +5,11 @@
 #include <stdbool.h>
 #include <stddef.h>
 
-/* 半成品检测（SEMI_TEST）串口 ASCII 帧解析
+/* 半成品检测协议：串口 ASCII 帧
  *
- * 帧格式：$<型号>,SEMI_TEST,<CHIP_ID>,<PRESS>,<TEMP>,<ACC_Z>,<BAT_V>,<CRC16>#\r\n
+ * 传感器 → 工装：$<型号>,SEMI_TEST,<CHIP_ID>,<PRESS>,<TEMP>,<ACC_Z>,<BAT_V>,<CRC16>#\r\n
+ * 工装 → 上位机：$<型号>,SEMI_RESULT,<RESULT>,<CHIP_ID>,<PRESS>,<TEMP>,<ACC_Z>,<BAT_V>,<CRC16>#\r\n
+ *               （RESULT=0 成功，1 失败；其余字段参照 SEMI_TEST 的传感器输出）
  *
  * CRC16 校验：复用 A7169/blt_gpio.h 里现成的 CRC16() 函数（原样使用，不改动），
  *             校验范围是 '$' 之后、最后一个 ',' 之间的 ASCII，结果高字节在前。 */
@@ -42,7 +44,12 @@ int proto_crc_check(const char *line, uint16_t *calc_out);
 
 /* 解析 SEMI_TEST 业务字段；返回 0=成功，-1=失败（含非 SEMI_TEST 帧） */
 int proto_parse_semi(const char *line, proto_semi_t *out);
-int proto_build_semi_result(char *out, size_t out_size, const char *chip_id, uint8_t result);
+
+/* 构建 SEMI_RESULT 上报帧（工装 → 上位机）：
+ * $<型号>,SEMI_RESULT,<RESULT>,<CHIP_ID>,<PRESS>,<TEMP>,<ACC_Z>,<BAT_V>,<CRC16>#\r\n
+ * result 非 0 一律按 1（失败）发送；返回帧长，失败返回 -1。 */
+int proto_build_semi_result(char *out, size_t out_size, uint8_t result,
+                            const proto_semi_t *semi);
 int proto_chip_id_equal(const char *left, const char *right);
 int proto_build_rf_chip_id(char *out, size_t out_size,
                            uint8_t vendor_type, uint8_t sensor_type,
