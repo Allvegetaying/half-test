@@ -42,8 +42,8 @@
 #define BATTERY_ADC_SAMPLE_PERIOD_MS  1000
 
 // Battery voltage = ADC pin voltage * NUM / DEN. Change this for the board divider.
-#define BATTERY_DIVIDER_NUM           1
-#define BATTERY_DIVIDER_DEN           1
+#define BATTERY_DIVIDER_NUM           5011
+#define BATTERY_DIVIDER_DEN           5000
 #define BATTERY_ADC_REF_MV            3300
 #define BATTERY_ADC_MAX_RAW           4095
 
