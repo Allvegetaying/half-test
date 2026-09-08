@@ -23,7 +23,6 @@
 #include "esp_adc/adc_cali.h"
 #include "esp_adc/adc_cali_scheme.h"
 #include "string.h"
-#include <stdlib.h>
 #include "A7169/A7169.h"
 #include "protocol.h"
 
@@ -39,31 +38,14 @@
 #define BATTERY_ADC_CHANNEL           ADC_CHANNEL_0
 #define BATTERY_ADC_ATTEN             ADC_ATTEN_DB_12
 #define BATTERY_ADC_BITWIDTH          ADC_BITWIDTH_DEFAULT
-#define BATTERY_ADC_SAMPLE_COUNT      32      /* 每轮采样数（排序去毛刺后取中段均值） */
-#define BATTERY_ADC_TRIMMED           6       /* 去掉最大/最小各 N 个毛刺样本再求均值 */
+#define BATTERY_ADC_SAMPLE_COUNT      16
 #define BATTERY_ADC_SAMPLE_PERIOD_MS  1000
 
-// Battery voltage = ADC pin voltage * NUM / DEN.
-// 板载 1/2 电阻分压（Vpin = Vbat/2，如 10k 对 10k），电池电压 = 引脚电压 * 2/1。
-// 名义电池 3.0~3.6V 折到引脚 1.5~1.8V，正好落在 S3 ADC(12dB) 的良好线性区间内。
-#define BATTERY_DIVIDER_NUM           2
+// Battery voltage = ADC pin voltage * NUM / DEN. Change this for the board divider.
+#define BATTERY_DIVIDER_NUM           1
 #define BATTERY_DIVIDER_DEN           1
-
-// 仅当 esp_adc eFuse 标定不可用时的线性回退满量程电压。S3 ADC 在 12dB 衰减下
-// 输入量程约 0~3.1V，回退按 3300 满量程会把读数整体算低，故用 3100。
-#define BATTERY_ADC_REF_MV            3100
+#define BATTERY_ADC_REF_MV            3300
 #define BATTERY_ADC_MAX_RAW           4095
-
-/* 可选：最终结果域两点线性校正（默认关闭，-1 即不启用）。
- * 目的：做到“接入已知电压 V → 上报 V”。给分压输入端加两档电压，串口日志里
- * 记下当前上报值（BAT=xxx），用万用表记下真实值，分别填到下面两组宏：
- *   加入 2.000V 上报 1.978，加入 3.300V 上报 3.312 时：
- *     LO_REPORT=1978 LO_TRUE=2000   HI_REPORT=3312 HI_TRUE=3300
- * 四点齐全即按 v_true = k*v_report + b 线性修正。 */
-#define BATTERY_CALI_LO_REPORT_MV     (-1)
-#define BATTERY_CALI_LO_TRUE_MV       (-1)
-#define BATTERY_CALI_HI_REPORT_MV     (-1)
-#define BATTERY_CALI_HI_TRUE_MV       (-1)
 
 // UART0 引脚定义
 #define UART0_TX_PIN    43
@@ -780,58 +762,27 @@ static esp_err_t battery_adc_init(void)
     return ESP_OK;
 }
 
-static int cmp_int(const void *a, const void *b)
-{
-    return *(const int *)a - *(const int *)b;
-}
-
-/* 结果域线性校正：v_true = k*v_report + b，k/b 由两组标定点拟合。
- * 未配置标定宏（默认 -1）时恒等返回。 */
-static int battery_apply_linear_calib(int mv)
-{
-#if (BATTERY_CALI_LO_REPORT_MV >= 0) && (BATTERY_CALI_LO_TRUE_MV >= 0) && \
-    (BATTERY_CALI_HI_REPORT_MV >= 0) && (BATTERY_CALI_HI_TRUE_MV >= 0) && \
-    (BATTERY_CALI_HI_REPORT_MV > BATTERY_CALI_LO_REPORT_MV)
-    const float slope = ((float)(BATTERY_CALI_HI_TRUE_MV - BATTERY_CALI_LO_TRUE_MV)) /
-                        ((float)(BATTERY_CALI_HI_REPORT_MV - BATTERY_CALI_LO_REPORT_MV));
-    const float offset = (float)BATTERY_CALI_LO_TRUE_MV -
-                         slope * (float)BATTERY_CALI_LO_REPORT_MV;
-    return (int)(slope * (float)mv + offset);
-#else
-    return mv;
-#endif
-}
-
 static esp_err_t battery_adc_read(int *raw_avg, int *battery_mv)
 {
     if (!battery_adc_handle || !raw_avg || !battery_mv) {
         return ESP_ERR_INVALID_ARG;
     }
 
-    int samples[BATTERY_ADC_SAMPLE_COUNT];
+    int raw_sum = 0;
     for (int i = 0; i < BATTERY_ADC_SAMPLE_COUNT; i++) {
         int raw = 0;
         esp_err_t ret = adc_oneshot_read(battery_adc_handle, BATTERY_ADC_CHANNEL, &raw);
         if (ret != ESP_OK) {
             return ret;
         }
-        samples[i] = raw;
+        raw_sum += raw;
     }
 
-    /* 升序排序，掐头去尾剔除单个毛刺/偶发跳变样本，对中间段求均值 */
-    qsort(samples, BATTERY_ADC_SAMPLE_COUNT, sizeof(int), cmp_int);
-    int lo = BATTERY_ADC_TRIMMED;
-    int hi = BATTERY_ADC_SAMPLE_COUNT - BATTERY_ADC_TRIMMED;
-    if (hi <= lo) { lo = 0; hi = BATTERY_ADC_SAMPLE_COUNT; }
-
-    int sum = 0;
-    for (int i = lo; i < hi; i++) {
-        sum += samples[i];
-    }
-    *raw_avg = sum / (hi - lo);
+    *raw_avg = raw_sum / BATTERY_ADC_SAMPLE_COUNT;
 
     int adc_mv = 0;
-    if (battery_adc_cali_enabled) {
+    if (battery_adc_cali_enabled)
+    {
         esp_err_t ret = adc_cali_raw_to_voltage(battery_adc_cali_handle, *raw_avg, &adc_mv);
         if (ret != ESP_OK) {
             return ret;
@@ -840,9 +791,7 @@ static esp_err_t battery_adc_read(int *raw_avg, int *battery_mv)
         adc_mv = (*raw_avg * BATTERY_ADC_REF_MV) / BATTERY_ADC_MAX_RAW;
     }
 
-    /* 先按分压比换算回电池电压，再做可选的两点线性校正 */
-    int bat_mv = (adc_mv * BATTERY_DIVIDER_NUM) / BATTERY_DIVIDER_DEN;
-    *battery_mv = battery_apply_linear_calib(bat_mv);
+    *battery_mv = (adc_mv * BATTERY_DIVIDER_NUM) / BATTERY_DIVIDER_DEN;
     return ESP_OK;
 }
 
@@ -857,14 +806,8 @@ static void adc_read_task(void *pvParameters)
         return;
     }
 
-    if (battery_adc_cali_enabled) {
-        printf("Battery ADC ready: GPIO%d ADC%d_CH%d (eFuse curve-fitting 标定启用)\n",
-               BATTERY_ADC_GPIO, BATTERY_ADC_UNIT + 1, BATTERY_ADC_CHANNEL);
-    } else {
-        printf("Battery ADC ready: GPIO%d ADC%d_CH%d (无 eFuse 标定，采用 %d mV 满量程线性回退，精度有限)\n",
-               BATTERY_ADC_GPIO, BATTERY_ADC_UNIT + 1, BATTERY_ADC_CHANNEL,
-               BATTERY_ADC_REF_MV);
-    }
+    printf("Battery ADC ready: GPIO%d ADC%d_CH%d\n",
+           BATTERY_ADC_GPIO, BATTERY_ADC_UNIT + 1, BATTERY_ADC_CHANNEL);
 
     while (1)
     {
